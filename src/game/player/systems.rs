@@ -4,7 +4,9 @@ use crate::game::common::components::MainCamera;
 use crate::game::stamina::components::Stamina;
 use crate::game::dodge::components::DodgeState;
 use crate::game::combat::components::{CombatState, Weapon};
-// Yeni bileşenleri import et
+use crate::game::lock_on::components::LockOnState;
+
+
 use super::components::{Player, PlayerState, PlayerMovementConfig}; 
 
 
@@ -124,15 +126,17 @@ pub fn spawn_player(
 pub fn player_movement(
     keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
-    config: Res<PlayerMovementConfig>, // EKLENDİ: Magic number'lar yerine Config
+    config: Res<PlayerMovementConfig>, 
+    lock_on: Res<LockOnState>,
     mut player_query: Query<(
         &mut Transform, 
         &mut KinematicCharacterController,
-        Option<&KinematicCharacterControllerOutput>, // EKLENDİ: Yere değme kontrolü
-        &mut PlayerState, // EKLENDİ: Dikey hız hafızası
+        Option<&KinematicCharacterControllerOutput>, //Yere değme kontrolü
+        &mut PlayerState, //  Dikey hız hafızası
         &mut Stamina,
     ), (With<Player>, Without<DodgeState>)>,
     camera_query: Query<&Transform, (With<MainCamera>, Without<Player>)>,
+    target_query: Query<&Transform, (Without<Player>, Without<MainCamera>)>, //  (Hedefin pozisyonunu almak için)
 ) {
     let Ok((mut player_transform, mut controller, output, mut state, mut stamina)) = player_query.get_single_mut() else { return };
     let Ok(camera_transform) = camera_query.get_single() else { return };
@@ -185,14 +189,27 @@ pub fn player_movement(
         // Havadaysak yerçekimini dikey hıza uygula (ivmelenme)
         state.vertical_velocity += config.gravity * time.delta_seconds();
     }
-
     // Dikey hızı (Y ekseni) asıl harekete dahil et
     movement.y = state.vertical_velocity * time.delta_seconds();
-
     controller.translation = Some(movement);
 
-    if direction != Vec3::ZERO {
-        let target_position = player_transform.translation + direction;
-        player_transform.look_at(target_position, Vec3::Y);
+    // --- GÜNCELLENEN ROTASYON MANTIĞI (STRAFING) ---
+    // Eğer lock-on aktifse ve hedef dünyadaysa
+    if let Some(target_entity) = lock_on.target {
+        if let Ok(target_transform) = target_query.get(target_entity) {
+            // Karakterin Y (yukarı/aşağı) eğilmesini engellemek için sadece X ve Z eksenine bakıyoruz
+            let target_pos = Vec3::new(
+                target_transform.translation.x, 
+                player_transform.translation.y, 
+                target_transform.translation.z
+            );
+            player_transform.look_at(target_pos, Vec3::Y);
+        }
+    } else {
+        // Lock-on yoksa serbest hareket (Gidilen yöne dön)
+        if direction != Vec3::ZERO {
+            let target_position = player_transform.translation + direction;
+            player_transform.look_at(target_position, Vec3::Y);
+        }
     }
 }

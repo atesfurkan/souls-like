@@ -3,6 +3,7 @@ use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, PrimaryWindow};
 use crate::game::common::components::MainCamera;
 use crate::game::player::components::Player;
+use crate::game::lock_on::components::LockOnState;
 
 pub fn spawn_camera(mut commands: Commands) {
     commands.spawn((
@@ -39,7 +40,11 @@ pub fn camera_controls(
     mut camera_query: Query<(&mut Transform, &mut MainCamera)>,
     player_query: Query<&Transform, (With<Player>, Without<MainCamera>)>,
     windows: Query<&Window, With<PrimaryWindow>>,
+    lock_on: Res<LockOnState>,
 ) {
+    if lock_on.target.is_some() {
+        return; 
+    }
     let Ok(window) = windows.get_single() else { return };
     let Ok(player_transform) = player_query.get_single() else { return };
     let Ok((mut cam_transform, mut cam_state)) = camera_query.get_single_mut() else { return };
