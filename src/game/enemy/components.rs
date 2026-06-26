@@ -11,6 +11,13 @@ pub enum EnemyAIState {
     Chase,
     Attack,
     Dead,
+    Stagger,
+}
+
+
+#[derive(Component)]
+pub struct StaggerState {
+    pub timer: Timer,
 }
 
 // YENİ: Düşman Yapay Zeka Ayarları (Data-driven esneklik sağlar)

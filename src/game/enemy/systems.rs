@@ -3,8 +3,53 @@ use bevy_rapier3d::prelude::*;
 use super::components::{Enemy, EnemyAI, EnemyAIState};
 use crate::game::health::components::Health;
 use crate::game::player::components::Player;
-use crate::game::combat::components::{CombatState, Weapon, EquippedWeapon};
+use crate::game::combat::components::{ StaggerEvent, CombatState, Weapon, EquippedWeapon , AttackDefinition, AttackType, AttackIntent };//burada neden eq. weapon var lan ,bi sorak
 use crate::game::lock_on::components::Lockable;
+use crate::game::enemy::components::StaggerState;
+
+
+use bevy::utils::HashMap;
+
+
+// YENİ: Hasar anında tetiklenen Stagger Event'ini yakalar
+pub fn handle_stagger_events(
+    mut commands: Commands,
+    mut events: EventReader<StaggerEvent>,
+    mut query: Query<(&mut EnemyAIState, &mut CombatState)>,
+) {
+    for event in events.read() {
+        println!("Stagger Event Received for entity: {:?}", event.target); // LOG
+        if let Ok((mut ai_state, mut combat_state)) = query.get_mut(event.target) {
+            println!("Applying Stagger to Enemy!");
+            *ai_state = EnemyAIState::Stagger;
+            // 2. Saldırıyı iptal et (combat'ı boşa çıkar)
+            *combat_state = CombatState::Idle;
+            // 3. Stagger bileşenini ekle
+            commands.entity(event.target).insert(StaggerState {
+                timer: Timer::from_seconds(event.duration, TimerMode::Once),
+            });
+        }
+        else{
+            println!("Enemy AI State not found for entity!");
+        }
+    }
+}
+
+// YENİ: Stagger süresini sayan ve bitince AI'yı eski haline döndüren sistem
+pub fn process_stagger(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut query: Query<(Entity, &mut StaggerState, &mut EnemyAIState)>,
+) {
+    for (entity, mut stagger, mut ai_state) in query.iter_mut() {
+        stagger.timer.tick(time.delta());
+        if stagger.timer.finished() {
+            *ai_state = EnemyAIState::Idle; // Stagger bitti
+            commands.entity(entity).remove::<StaggerState>(); // Bileşeni sil
+        }
+    }
+}
+
 
 pub fn spawn_enemy(
     mut commands: Commands,
@@ -35,14 +80,32 @@ pub fn spawn_enemy(
             attack_cooldown: Timer::from_seconds(1.5, TimerMode::Once), // 1.5 saniyede bir vurabilir
         },
         CombatState::default(),
+        AttackIntent::default(),
         Weapon {
-            windup_duration: 0.4,    // Düşman biraz daha yavaş vursun (souls-like tell/tepki süresi)
-            active_duration: 0.2,
-            recovery_duration: 0.6,
-            stamina_cost: 0.0,       // Düşman şimdilik stamina harcamasın
-            damage: 15.0,            // Oyuncuya vereceği hasar
-            hitbox_radius: 0.5,
-            hitbox_offset: Vec3::new(0.0, 1.0, -1.2),
+            attacks: {
+                let mut map = HashMap::new();
+                map.insert(AttackType::Thrust, AttackDefinition {
+                    windup_duration: 0.3, active_duration: 0.2, recovery_duration: 0.5,
+                    stamina_cost: 15.0, damage: 22.0,
+                    hitbox_radius: 0.3, hitbox_offset: Vec3::new(0.0, 0.8, -1.5), // İleri doğru, dar alan
+                });
+                map.insert(AttackType::Overhead, AttackDefinition {
+                    windup_duration: 0.5, active_duration: 0.2, recovery_duration: 0.7,
+                    stamina_cost: 22.0, damage: 40.0, // Ağır vuruş
+                    hitbox_radius: 0.4, hitbox_offset: Vec3::new(0.0, 0.5, -1.0), // Yakın mesafe ezme
+                });
+                map.insert(AttackType::LeftSwing, AttackDefinition {
+                    windup_duration: 0.4, active_duration: 0.2, recovery_duration: 0.6,
+                    stamina_cost: 20.0, damage: 20.0,
+                    hitbox_radius: 0.6, hitbox_offset: Vec3::new(0.0, 1.0, -0.8), // Geniş alan kontrolü
+                });
+                map.insert(AttackType::RightSwing, AttackDefinition {
+                    windup_duration: 0.4, active_duration: 0.2, recovery_duration: 0.6,
+                    stamina_cost: 20.0, damage: 20.0,
+                    hitbox_radius: 0.6, hitbox_offset: Vec3::new(0.0, 1.0, -0.8), // Geniş alan kontrolü
+                });
+                map
+            }
         },
 
         // --- Fizik Bileşenleri ---
@@ -160,16 +223,31 @@ velocity.linvel.z = 0.0;
                 } 
                 // Menzildeyse, cooldown bittiyse ve şu an boştaysa (Idle) saldırıyı başlat!
                 else if matches!(*combat_state, CombatState::Idle) && ai.attack_cooldown.finished() {
-                    // Savaş sistemini tetikliyoruz (FSM -> Combat Köprüsü)
-                    *combat_state = CombatState::Windup(Timer::from_seconds(weapon.windup_duration, TimerMode::Once));
+                    let chosen_attack = AttackType::Thrust; 
+                    
+                    // 2. Silahın içindeki sözlükten o saldırının verisini çek
+                    if let Some(attack_def) = weapon.attacks.get(&chosen_attack) {
+                        
+                        // 3. CombatState'i güncelle
+                        *combat_state = CombatState::Windup {
+                            timer: Timer::from_seconds(attack_def.windup_duration, TimerMode::Once), 
+                            attack_type: chosen_attack
+                        };
                     ai.attack_cooldown.reset(); // Cooldown'ı baştan kur
                 }
+            }
             }
             EnemyAIState::Dead => {
                 velocity.linvel.x = 0.0;
 velocity.linvel.z = 0.0;
 // Y'ye dokunmuyoruz ki düşebilsin
             }
+            EnemyAIState::Stagger => {
+                velocity.linvel = Vec3::ZERO; // Sersemlediğinde hareket etmesin
+            }
+            }
         }
-    }
+    
 }
+
+

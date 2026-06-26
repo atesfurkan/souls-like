@@ -3,9 +3,10 @@ use bevy_rapier3d::prelude::*;
 use crate::game::common::components::MainCamera;
 use crate::game::stamina::components::Stamina;
 use crate::game::dodge::components::DodgeState;
-use crate::game::combat::components::{CombatState, Weapon};
+use crate::game::combat::components::{CombatState, Weapon, AttackDefinition, AttackType, AttackIntent};
 use crate::game::lock_on::components::LockOnState;
 
+use bevy::utils::HashMap;
 
 use super::components::{Player, PlayerState, PlayerMovementConfig}; 
 
@@ -31,17 +32,34 @@ pub fn spawn_player(
         },
         Player,
         PlayerState::default(),
-        CombatState::default(), // YENİ: Başlangıçta Idle
+        CombatState::default(), // Başlangıçta Idle
+        AttackIntent::default(), // YENİ EKLENDİ
         // YENİ: Mızrak istatistikleri
         Weapon {
-            windup_duration: 0.3,
-            active_duration: 0.2,
-            recovery_duration: 0.5,
-            stamina_cost: 20.0,
-            damage: 25.0, // Bir vuruşta verilecek hasar
-            hitbox_radius: 0.4, // Vuruş küresinin büyüklüğü
-            // Karakterin merkezine göre önünde, biraz yukarıda bir alanda hasar oluşturacak
-            hitbox_offset: Vec3::new(0.0, 1.0, -1.2), 
+            attacks: {
+                let mut map = HashMap::new();
+                map.insert(AttackType::Thrust, AttackDefinition {
+                    windup_duration: 0.3, active_duration: 0.2, recovery_duration: 0.5,
+                    stamina_cost: 15.0, damage: 25.0,
+                    hitbox_radius: 0.3, hitbox_offset: Vec3::new(0.0, 0.8, -1.5), // İleri doğru, dar alan
+                });
+                map.insert(AttackType::Overhead, AttackDefinition {
+                    windup_duration: 0.5, active_duration: 0.2, recovery_duration: 0.7,
+                    stamina_cost: 25.0, damage: 40.0, // Ağır vuruş
+                    hitbox_radius: 0.4, hitbox_offset: Vec3::new(0.0, 0.5, -1.0), // Yakın mesafe ezme
+                });
+                map.insert(AttackType::LeftSwing, AttackDefinition {
+                    windup_duration: 0.4, active_duration: 0.2, recovery_duration: 0.6,
+                    stamina_cost: 20.0, damage: 20.0,
+                    hitbox_radius: 0.6, hitbox_offset: Vec3::new(0.0, 1.0, -0.8), // Geniş alan kontrolü
+                });
+                map.insert(AttackType::RightSwing, AttackDefinition {
+                    windup_duration: 0.4, active_duration: 0.2, recovery_duration: 0.6,
+                    stamina_cost: 20.0, damage: 20.0,
+                    hitbox_radius: 0.6, hitbox_offset: Vec3::new(0.0, 1.0, -0.8), // Geniş alan kontrolü
+                });
+                map
+            }
         },
         RigidBody::KinematicPositionBased,
         Collider::capsule_y(0.5, 0.5), 
