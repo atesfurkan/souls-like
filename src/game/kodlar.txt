@@ -1,100 +1,171 @@
-=== FILE: camera/plugin.rs ===
+=== FILE: combat/components.rs ===
 use bevy::prelude::*;
-use super::systems::{camera_controls, cursor_management, spawn_camera};
+use bevy::utils::{HashMap, HashSet};
 
-pub struct CameraPlugin;
 
-impl Plugin for CameraPlugin {
-    fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_camera)
-           .add_systems(Update, (camera_controls, cursor_management));
+
+#[derive(Component)]
+pub struct Hurtbox {
+    pub owner: Entity, // Hasarın uygulanacağı ana entity (Health buradadır)
+}
+
+#[derive(Event)]
+pub struct StaggerEvent {
+    pub target: Entity,
+    pub force: f32, // İleride Poise ile karşılaştırılacak
+    pub duration: f32,
+}
+
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AttackType {
+    Thrust,
+    Overhead,
+    LeftSwing,
+    RightSwing,
+}
+
+// O anki saldırı niyetini tutan bileşen
+#[derive(Component)]
+pub struct AttackIntent {
+    pub current: AttackType,
+}
+
+impl Default for AttackIntent {
+    fn default() -> Self {
+        Self { current: AttackType::Thrust }
     }
 }
 
-=== FILE: camera/mod.rs ===
-pub mod plugin;
-pub mod systems;
+// Tek bir saldırının tüm özellikleri
+#[derive(Clone)]
+pub struct AttackDefinition {
+    pub windup_duration: f32,
+    pub active_duration: f32,
+    pub recovery_duration: f32,
+    pub stamina_cost: f32,
+    pub damage: f32,
+    pub hitbox_radius: f32,
+    pub hitbox_offset: Vec3,
+}
 
-=== FILE: camera/systems.rs ===
-use bevy::input::mouse::MouseMotion;
+// Silah artık bir saldırı sözlüğü tutuyor
+#[derive(Component)]
+pub struct Weapon {
+    pub attacks: HashMap<AttackType, AttackDefinition>,
+}
+
+#[derive(Component, Default)]
+pub enum CombatState {
+    #[default]
+    Idle,
+    // Artık her durum, hangi saldırının yapıldığını biliyor
+    Windup { timer: Timer, attack_type: AttackType },
+    Active { timer: Timer, hitbox_entity: Option<Entity>, attack_type: AttackType },
+    Recovery { timer: Timer, attack_type: AttackType },
+}
+
+#[derive(Component)]
+pub struct Hitbox {
+    pub damage: f32,
+    pub owner: Entity,
+    pub hit_entities: HashSet<Entity>,
+}
+
+#[derive(Component)]
+pub struct EquippedWeapon;
+
+=== FILE: health/components.rs ===
 use bevy::prelude::*;
-use bevy::window::{CursorGrabMode, PrimaryWindow};
-use crate::game::common::components::MainCamera;
-use crate::game::player::components::Player;
-use crate::game::lock_on::components::LockOnState;
 
-pub fn spawn_camera(mut commands: Commands) {
-    commands.spawn((
-        Camera3dBundle::default(),
-        MainCamera {
-            distance: 6.0,
-            pitch: 0.3, // Hafifçe yukarıdan bak
-            yaw: 0.0,
-        },
-    ));
+#[derive(Component)]
+pub struct Health {
+    pub current: f32,
+    pub max: f32,
 }
 
-pub fn cursor_management(
-    mut windows: Query<&mut Window, With<PrimaryWindow>>,
-    mouse: Res<ButtonInput<MouseButton>>,
-    keys: Res<ButtonInput<KeyCode>>,
-) {
-    let Ok(mut window) = windows.get_single_mut() else { return };
-    
-    // Ekrana tıklayınca fareyi kilitle
-    if mouse.just_pressed(MouseButton::Left) {
-        window.cursor.grab_mode = CursorGrabMode::Locked;
-        window.cursor.visible = false;
-    }
-    // ESC'ye basınca fareyi serbest bırak
-    if keys.just_pressed(KeyCode::Escape) {
-        window.cursor.grab_mode = CursorGrabMode::None;
-        window.cursor.visible = true;
+impl Health {
+    pub fn new(max_health: f32) -> Self {
+        Self {
+            current: max_health,
+            max: max_health,
+        }
     }
 }
 
-pub fn camera_controls(
-    mut ev_motion: EventReader<MouseMotion>,
-    mut camera_query: Query<(&mut Transform, &mut MainCamera)>,
-    player_query: Query<&Transform, (With<Player>, Without<MainCamera>)>,
-    windows: Query<&Window, With<PrimaryWindow>>,
-    lock_on: Res<LockOnState>,
-) {
-    if lock_on.target.is_some() {
-        return; 
+=== FILE: player/components.rs ===
+use bevy::prelude::Component;
+
+use bevy::prelude::*;
+
+#[derive(Resource)]
+pub struct PlayerMovementConfig {
+    pub walk_speed: f32,
+    pub sprint_speed: f32,
+    pub jump_velocity: f32,
+    pub gravity: f32,
+}
+
+impl Default for PlayerMovementConfig {
+    fn default() -> Self {
+        Self {
+            walk_speed: 4.0,
+            sprint_speed: 8.0,
+            jump_velocity: 15.0,
+            gravity: -15.0,
+        }
     }
-    let Ok(window) = windows.get_single() else { return };
-    let Ok(player_transform) = player_query.get_single() else { return };
-    let Ok((mut cam_transform, mut cam_state)) = camera_query.get_single_mut() else { return };
+}
 
-    // Sadece fare kilitliyken kamerayı döndür
-    if window.cursor.grab_mode != CursorGrabMode::Locked {
-        return;
-    }
+#[derive(Component, Default)]
+pub struct PlayerState {
+    pub vertical_velocity: f32,
+}
 
-    let mut mouse_delta = Vec2::ZERO;
-    for ev in ev_motion.read() {
-        mouse_delta += ev.delta;
-    }
 
-    let sensitivity = 0.003;
-    cam_state.yaw -= mouse_delta.x * sensitivity;
-    cam_state.pitch -= mouse_delta.y * sensitivity;
+#[derive(Component)]
+pub struct Player;
 
-    // Pitch (yukarı/aşağı) açısını sınırla, kameranın ters dönmesini engelle
-    cam_state.pitch = cam_state.pitch.clamp(-1.0, 1.5);
+=== FILE: common/components.rs ===
+use bevy::prelude::Component;
 
-    // Yeni dönüş rotasyonunu hesapla (Önce Yaw, sonra Pitch)
-    let rotation = Quat::from_axis_angle(Vec3::Y, cam_state.yaw)
-        * Quat::from_axis_angle(Vec3::X, cam_state.pitch);
+#[derive(Component)]
+pub struct MainCamera {
+    pub distance: f32,
+    pub pitch: f32,
+    pub yaw: f32,
+}
 
-    // Oyuncunun pozisyonuna offset (mesafe) ekle
-    let target_offset = rotation * Vec3::new(0.0, 0.0, cam_state.distance);
-    
-    // Kameranın hedefini oyuncunun biraz yukarısı (gövdesi/kafası) olarak ayarla
-    let look_target = player_transform.translation + Vec3::new(0.0, 1.0, 0.0);
-    
-    cam_transform.translation = look_target + target_offset;
-    cam_transform.look_at(look_target, Vec3::Y);
+=== FILE: enemy/components.rs ===
+use bevy::prelude::*;
+
+#[derive(Component)]
+pub struct Enemy;
+
+// YENİ: FSM Durumları
+#[derive(Component, Default, PartialEq, Eq, Clone, Copy ,Debug)]
+pub enum EnemyAIState {
+    #[default]
+    Idle,
+    Chase,
+    Attack,
+    Dead,
+    Stagger,
+}
+
+
+#[derive(Component)]
+pub struct StaggerState {
+    pub timer: Timer,
+}
+
+// YENİ: Düşman Yapay Zeka Ayarları (Data-driven esneklik sağlar)
+#[derive(Component)]
+pub struct EnemyAI {
+    pub detection_range: f32,
+    pub attack_range: f32,
+    pub speed: f32,
+    pub attack_cooldown: Timer,
 }
 

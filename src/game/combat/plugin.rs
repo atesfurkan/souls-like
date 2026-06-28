@@ -1,9 +1,14 @@
 use bevy::prelude::*;
-use super::systems::{  handle_attacks, process_attack_states, hit_detection, animate_weapon, update_attack_intent};
+use super::systems::{  handle_attacks, process_attack_states, 
+    hit_detection, animate_weapon, update_attack_intent, 
+    spawn_hitbox_on_attack, hit_registration_system, cleanup_hitboxes , 
+    };
 use super::components::StaggerEvent;
-use crate::game::enemy::systems::handle_stagger_events ;
+use crate::game::enemy::systems::{handle_stagger_events,process_stagger}  ;
 
 pub struct CombatPlugin;
+
+
 
 impl Plugin for CombatPlugin {
     fn build(&self, app: &mut App) {
@@ -15,6 +20,10 @@ impl Plugin for CombatPlugin {
             hit_detection,
             animate_weapon,
             handle_stagger_events, 
+            process_stagger,
+            spawn_hitbox_on_attack,
+            hit_registration_system,
+            cleanup_hitboxes,
             
         ).chain());
     }

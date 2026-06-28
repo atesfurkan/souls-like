@@ -1,0 +1,110 @@
+use bevy::prelude::*;
+use bevy_rapier3d::prelude::*;
+use super::components::{Enemy, EnemyAI, EnemyAIState};
+use crate::game::health::components::Health;
+use crate::game::player::components::Player;
+use crate::game::combat::components::{ StaggerEvent, CombatState,
+     Weapon, EquippedWeapon , 
+     AttackDefinition, AttackType, AttackIntent , Hurtbox };//burada neden eq. weapon var lan ,bi sorak
+use crate::game::lock_on::components::Lockable;
+use crate::game::enemy::components::StaggerState;
+
+
+use bevy::utils::HashMap;
+
+
+
+pub fn spawn_enemy(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+)  {
+    // 1. Önce ID alıyoruz
+    let enemy_entity = commands.spawn_empty().id();
+
+    let enemy_material = materials.add(Color::srgb(0.8, 0.1, 0.1));
+    let weapon_wood = materials.add(Color::srgb(0.4, 0.2, 0.1));
+    let weapon_metal = materials.add(Color::srgb(0.8, 0.8, 0.8));
+    
+
+    commands.entity(enemy_entity).insert((
+        // GÖRSEL (PbrBundle)
+        PbrBundle {
+            mesh: meshes.add(Capsule3d { radius: 0.6, half_length: 0.6 }),
+            material: enemy_material,
+            transform: Transform::from_xyz(5.0, 3.0, -5.0),
+            ..default()
+        },
+        Enemy,
+        Lockable,
+        Health::new(100.0),
+        Hurtbox { owner: enemy_entity }, // Düşmanın hasar alma kutusu
+        
+        // --- YENİ: AI ve Savaş Bileşenleri ---
+        EnemyAIState::Idle,
+        EnemyAI {
+            detection_range: 12.0,
+            attack_range: 2.0, // Mızrak menzili oyuncuya yetecek kadar uzun
+            speed: 3.0,
+            attack_cooldown: Timer::from_seconds(1.5, TimerMode::Once), // 1.5 saniyede bir vurabilir
+        },
+        CombatState::default(),
+        AttackIntent::default(),
+        Weapon {
+            attacks: {
+                let mut map = HashMap::new();
+                map.insert(AttackType::Thrust, AttackDefinition {
+                    windup_duration: 0.3, active_duration: 0.2, recovery_duration: 0.5,
+                    stamina_cost: 15.0, damage: 22.0,
+                    hitbox_radius: 0.3, hitbox_offset: Vec3::new(0.0, 0.8, -1.5), // İleri doğru, dar alan
+                });
+                map.insert(AttackType::Overhead, AttackDefinition {
+                    windup_duration: 0.5, active_duration: 0.2, recovery_duration: 0.7,
+                    stamina_cost: 22.0, damage: 40.0, // Ağır vuruş
+                    hitbox_radius: 0.4, hitbox_offset: Vec3::new(0.0, 0.5, -1.0), // Yakın mesafe ezme
+                });
+                map.insert(AttackType::LeftSwing, AttackDefinition {
+                    windup_duration: 0.4, active_duration: 0.2, recovery_duration: 0.6,
+                    stamina_cost: 20.0, damage: 20.0,
+                    hitbox_radius: 0.6, hitbox_offset: Vec3::new(0.0, 1.0, -0.8), // Geniş alan kontrolü
+                });
+                map.insert(AttackType::RightSwing, AttackDefinition {
+                    windup_duration: 0.4, active_duration: 0.2, recovery_duration: 0.6,
+                    stamina_cost: 20.0, damage: 20.0,
+                    hitbox_radius: 0.6, hitbox_offset: Vec3::new(0.0, 1.0, -0.8), // Geniş alan kontrolü
+                });
+                map
+            }
+        },
+
+        // --- Fizik Bileşenleri ---
+        RigidBody::Dynamic, 
+        Velocity::default(), // Hareketi kontrol etmek için eklendi
+        Collider::capsule_y(0.6, 0.6),
+        LockedAxes::ROTATION_LOCKED, 
+    ))
+    .with_children(|parent| {
+        // --- SİLAH (SPEAR) ---
+        // Oyuncunun mızrağının birebir aynısı düşmanın eline de bağlanıyor
+        parent.spawn((
+            SpatialBundle {
+                transform: Transform::from_xyz(0.7, 0.0, -0.6)
+                    .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_4)),
+                ..default()
+            },
+            EquippedWeapon, 
+        )).with_children(|weapon_parent| {
+            weapon_parent.spawn(PbrBundle {
+                mesh: meshes.add(Cylinder { radius: 0.05, half_height: 1.0 }),
+                material: weapon_wood,
+                ..default()
+            });
+            weapon_parent.spawn(PbrBundle {
+                mesh: meshes.add(Cone { radius: 0.1, height: 0.4 }),
+                material: weapon_metal,
+                transform: Transform::from_xyz(0.0, 1.2, 0.0),
+                ..default()
+            });
+        });
+    });
+}

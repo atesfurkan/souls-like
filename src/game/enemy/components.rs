@@ -4,7 +4,7 @@ use bevy::prelude::*;
 pub struct Enemy;
 
 // YENİ: FSM Durumları
-#[derive(Component, Default, PartialEq, Eq, Clone, Copy)]
+#[derive(Component, Default, PartialEq, Eq, Clone, Copy ,Debug)]
 pub enum EnemyAIState {
     #[default]
     Idle,

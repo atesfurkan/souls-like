@@ -2,6 +2,12 @@ use bevy::prelude::*;
 use bevy::utils::{HashMap, HashSet};
 
 
+
+#[derive(Component)]
+pub struct Hurtbox {
+    pub owner: Entity, // Hasarın uygulanacağı ana entity (Health buradadır)
+}
+
 #[derive(Event)]
 pub struct StaggerEvent {
     pub target: Entity,

@@ -1,8 +1,8 @@
 use bevy::prelude::*;
-use super::systems::{player_movement, spawn_player};
-
+use super::systems::player_movement;
+//use super::spawn::spawn_player;
 use super::components::{Player, PlayerState, PlayerMovementConfig};
-
+use crate::game::player::spawn::spawn_player;
 
 
 pub struct PlayerPlugin;

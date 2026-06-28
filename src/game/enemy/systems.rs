@@ -42,8 +42,10 @@ pub fn process_stagger(
     mut query: Query<(Entity, &mut StaggerState, &mut EnemyAIState)>,
 ) {
     for (entity, mut stagger, mut ai_state) in query.iter_mut() {
+        println!("Stagger Timer: {:?}", stagger.timer.remaining());
         stagger.timer.tick(time.delta());
         if stagger.timer.finished() {
+            println!("Stagger süresi doldu, durumu Idle'a çekiyorum.");
             *ai_state = EnemyAIState::Idle; // Stagger bitti
             commands.entity(entity).remove::<StaggerState>(); // Bileşeni sil
         }
@@ -51,100 +53,14 @@ pub fn process_stagger(
 }
 
 
-pub fn spawn_enemy(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    let enemy_material = materials.add(Color::srgb(0.8, 0.1, 0.1));
-    let weapon_wood = materials.add(Color::srgb(0.4, 0.2, 0.1));
-    let weapon_metal = materials.add(Color::srgb(0.8, 0.8, 0.8));
 
-    commands.spawn((
-        PbrBundle {
-            mesh: meshes.add(Capsule3d { radius: 0.6, half_length: 0.6 }), 
-            material: enemy_material,
-            transform: Transform::from_xyz(5.0, 3.0, -5.0),
-            ..default()
-        },
-        Enemy,
-        Lockable,
-        Health::new(100.0),
-        
-        // --- YENİ: AI ve Savaş Bileşenleri ---
-        EnemyAIState::Idle,
-        EnemyAI {
-            detection_range: 12.0,
-            attack_range: 2.0, // Mızrak menzili oyuncuya yetecek kadar uzun
-            speed: 3.0,
-            attack_cooldown: Timer::from_seconds(1.5, TimerMode::Once), // 1.5 saniyede bir vurabilir
-        },
-        CombatState::default(),
-        AttackIntent::default(),
-        Weapon {
-            attacks: {
-                let mut map = HashMap::new();
-                map.insert(AttackType::Thrust, AttackDefinition {
-                    windup_duration: 0.3, active_duration: 0.2, recovery_duration: 0.5,
-                    stamina_cost: 15.0, damage: 22.0,
-                    hitbox_radius: 0.3, hitbox_offset: Vec3::new(0.0, 0.8, -1.5), // İleri doğru, dar alan
-                });
-                map.insert(AttackType::Overhead, AttackDefinition {
-                    windup_duration: 0.5, active_duration: 0.2, recovery_duration: 0.7,
-                    stamina_cost: 22.0, damage: 40.0, // Ağır vuruş
-                    hitbox_radius: 0.4, hitbox_offset: Vec3::new(0.0, 0.5, -1.0), // Yakın mesafe ezme
-                });
-                map.insert(AttackType::LeftSwing, AttackDefinition {
-                    windup_duration: 0.4, active_duration: 0.2, recovery_duration: 0.6,
-                    stamina_cost: 20.0, damage: 20.0,
-                    hitbox_radius: 0.6, hitbox_offset: Vec3::new(0.0, 1.0, -0.8), // Geniş alan kontrolü
-                });
-                map.insert(AttackType::RightSwing, AttackDefinition {
-                    windup_duration: 0.4, active_duration: 0.2, recovery_duration: 0.6,
-                    stamina_cost: 20.0, damage: 20.0,
-                    hitbox_radius: 0.6, hitbox_offset: Vec3::new(0.0, 1.0, -0.8), // Geniş alan kontrolü
-                });
-                map
-            }
-        },
-
-        // --- Fizik Bileşenleri ---
-        RigidBody::Dynamic, 
-        Velocity::default(), // Hareketi kontrol etmek için eklendi
-        Collider::capsule_y(0.6, 0.6),
-        LockedAxes::ROTATION_LOCKED, 
-    ))
-    .with_children(|parent| {
-        // --- SİLAH (SPEAR) ---
-        // Oyuncunun mızrağının birebir aynısı düşmanın eline de bağlanıyor
-        parent.spawn((
-            SpatialBundle {
-                transform: Transform::from_xyz(0.7, 0.0, -0.6)
-                    .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_4)),
-                ..default()
-            },
-            EquippedWeapon, 
-        )).with_children(|weapon_parent| {
-            weapon_parent.spawn(PbrBundle {
-                mesh: meshes.add(Cylinder { radius: 0.05, half_height: 1.0 }),
-                material: weapon_wood,
-                ..default()
-            });
-            weapon_parent.spawn(PbrBundle {
-                mesh: meshes.add(Cone { radius: 0.1, height: 0.4 }),
-                material: weapon_metal,
-                transform: Transform::from_xyz(0.0, 1.2, 0.0),
-                ..default()
-            });
-        });
-    });
-}
 
 // YENİ SİSTEM: Düşman FSM Yapay Zekası
 pub fn enemy_ai_system(
     time: Res<Time>,
     player_query: Query<&Transform, With<Player>>,
     mut enemy_query: Query<(
+        Entity,
         &mut Transform,
         &mut Velocity,
         &mut EnemyAI,
@@ -158,8 +74,9 @@ pub fn enemy_ai_system(
     let Ok(player_transform) = player_query.get_single() else { return };
     let player_pos = player_transform.translation;
 
-    for (mut transform, mut velocity, mut ai, mut ai_state, mut combat_state, weapon, health) in enemy_query.iter_mut() {
+    for (entity, mut transform, mut velocity, mut ai, mut ai_state, mut combat_state, weapon, health) in enemy_query.iter_mut() {
         // Cooldown sayacı her frame akar
+        //println!("Entity: {:?} | State: {:?}", entity, *ai_state);
         ai.attack_cooldown.tick(time.delta());
 
         // 1. KURAL: Can sıfır veya altındaysa AI sistemlerinden tamamen çık
@@ -180,6 +97,7 @@ pub fn enemy_ai_system(
         let direction_flat = direction.normalize_or_zero();
 
         match *ai_state {
+            
             EnemyAIState::Idle => {
                 velocity.linvel.x = 0.0;
                 velocity.linvel.z = 0.0;
@@ -244,6 +162,7 @@ velocity.linvel.z = 0.0;
             }
             EnemyAIState::Stagger => {
                 velocity.linvel = Vec3::ZERO; // Sersemlediğinde hareket etmesin
+                return;
             }
             }
         }

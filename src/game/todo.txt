@@ -1,0 +1,5 @@
+abi weapon diye klasör oluşturup weapon verilerini orada tutmak lazım
+enemy ai için de ayrı dosya lazım olabilir ama bilmiyorum
+her yazdığımız yardımcı dosya için nasıl kullanılır txt belgesi lazım
+	mesela weapon , health , stamina falan
+

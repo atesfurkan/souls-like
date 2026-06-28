@@ -1,15 +1,200 @@
-use super::components::{StaggerEvent ,AttackIntent, AttackType, CombatState, EquippedWeapon, Hitbox, Weapon};
+use super::components::{StaggerEvent 
+    ,AttackIntent, AttackType, CombatState, 
+    EquippedWeapon, Hitbox, Weapon , Hurtbox};
 use crate::game::health::events::DamageEvent; // Event'imizi import ediyoruz
 use crate::game::lock_on::components::LockOnState;
 use crate::game::player::components::Player;
 use crate::game::stamina::components::Stamina;
 use crate::game::enemy::components::StaggerState;
+use crate::game::health::components::Health;
 
 
 use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
 use bevy::utils::HashSet;
 use bevy_rapier3d::prelude::*;
+
+
+// 1. GERÇEK OYUNCU GİRDİSİ (Senin AttackIntent yapınla)
+pub fn player_attack_input(
+    mouse_input: Res<ButtonInput<MouseButton>>,
+    mut query: Query<(&mut CombatState, &Weapon, &AttackIntent),
+    With<Player>>,
+    
+) {
+    if mouse_input.just_pressed(MouseButton::Left) {
+        for (mut state, weapon, intent) in query.iter_mut() {
+            // Sadece Idle durumundayken saldırılabilir
+            if let CombatState::Idle = *state {
+                // Karakterin mevcut niyetini (Mızrak için Thrust) çekiyoruz
+                if let Some(def) = weapon.attacks.get(&intent.current) {
+                    // Senin Weapon bileşenindeki süreleri kullanıyoruz
+                    *state = CombatState::Windup {
+                        timer: Timer::from_seconds(def.windup_duration, TimerMode::Once),
+                        attack_type: intent.current,
+                    };
+                    println!("Mızrak saldırısı tetiklendi: {:?}", intent.current);
+                }
+            }
+        }
+    }
+}
+
+// 2. SAVAŞ DURUM MAKİNESİ (Senin orijinal silah sürelerini kullanır)
+pub fn combat_state_machine(
+    time: Res<Time>,
+    mut query: Query<(&mut CombatState, &Weapon)>,
+) {
+    for (mut state, weapon) in query.iter_mut() {
+        let mut next_state = None;
+
+        match *state {
+            CombatState::Windup { ref mut timer, attack_type } => {
+                timer.tick(time.delta());
+                if timer.just_finished() {
+                    let def = weapon.attacks.get(&attack_type).unwrap();
+                    next_state = Some(CombatState::Active {
+                        timer: Timer::from_seconds(def.active_duration, TimerMode::Once),
+                        hitbox_entity: None,
+                        attack_type,
+                    });
+                }
+            }
+            CombatState::Active { ref mut timer, attack_type, .. } => {
+                timer.tick(time.delta());
+                if timer.just_finished() {
+                    let def = weapon.attacks.get(&attack_type).unwrap();
+                    next_state = Some(CombatState::Recovery {
+                        timer: Timer::from_seconds(def.recovery_duration, TimerMode::Once),
+                        attack_type,
+                    });
+                }
+            }
+            CombatState::Recovery { ref mut timer, .. } => {
+                timer.tick(time.delta());
+                if timer.just_finished() {
+                    next_state = Some(CombatState::Idle);
+                }
+            }
+            CombatState::Idle => {}
+        }
+
+        if let Some(new_state) = next_state {
+            *state = new_state;
+        }
+    }
+}
+
+
+
+pub fn cleanup_hitboxes(
+    mut commands: Commands,
+    hitbox_query: Query<(Entity, &Hitbox)>,
+    owner_query: Query<&CombatState>,
+) {
+    for (hitbox_entity, hitbox) in hitbox_query.iter() {
+        // Hitbox'ın sahibinin (Player/Enemy) mevcut durumunu al
+        if let Ok(combat_state) = owner_query.get(hitbox.owner) {
+            
+            // Eğer sahibi artık 'Active' durumunda DEĞİLSE, saldırı bitmiş demektir. Hitbox'ı sil!
+            if !matches!(combat_state, CombatState::Active { .. }) {
+                commands.entity(hitbox_entity).despawn();
+            }
+            
+        } else {
+            // Eğer hitbox'ın sahibi (owner) oyundan tamamen despawn olduysa yetim kalan hitbox'ı sil
+            commands.entity(hitbox_entity).despawn();
+        }
+    }
+}
+
+pub fn hit_registration_system(
+    mut collision_events: EventReader<CollisionEvent>,
+    mut hitbox_query: Query<&mut Hitbox>,
+    hurtbox_query: Query<&Hurtbox>,
+    mut health_query: Query<&mut Health>,
+) {
+    for collision_event in collision_events.read() {
+        // Sadece kesişme başladığında çalışsın (Started)
+        if let CollisionEvent::Started(entity1, entity2, _) = collision_event {
+            
+            // Hangi Entity Hitbox, hangisi Hurtbox? Bunu belirle.
+            let (hitbox_entity, hurtbox_entity) = if hitbox_query.contains(*entity1) && hurtbox_query.contains(*entity2) {
+                (*entity1, *entity2)
+            } else if hitbox_query.contains(*entity2) && hurtbox_query.contains(*entity1) {
+                (*entity2, *entity1)
+            } else {
+                continue; // İkisi de Hitbox/Hurtbox eşleşmesi değilse pas geç
+            };
+
+            // Bileşenleri güvenli bir şekilde al
+            let Ok(mut hitbox) = hitbox_query.get_mut(hitbox_entity) else { continue };
+            let Ok(hurtbox) = hurtbox_query.get(hurtbox_entity) else { continue };
+
+            // 1. Kendi kendine vurmayı engelle (Player kendi kılıcıyla vurulmasın)
+            if hitbox.owner == hurtbox.owner { continue; }
+
+            // 2. Double Hit (Tek saldırıda çoklu hasar) engelleme
+            // Eğer bu Hurtbox'ın sahibi zaten vurulanlar listesindeyse, işlemi iptal et
+            if hitbox.hit_entities.contains(&hurtbox.owner) { continue; }
+
+            // 3. Health Pipeline Entegrasyonu
+            // Hasarı kime uygulayacağız? Hurtbox'ın owner'ına (Player veya Enemy) [cite: 1]
+            if let Ok(mut health) = health_query.get_mut(hurtbox.owner) {
+                
+                // Hasarı uygula [cite: 4]
+                health.current -= hitbox.damage;
+                
+                println!(
+                    "HIT REGISTERED! Entity {:?} dealt {} damage to Entity {:?}. Target Health: {}/{}",
+                    hitbox.owner, hitbox.damage, hurtbox.owner, health.current, health.max
+                );
+
+                // 4. Hitbox'a bu hedefi vurduğunu kaydet ki bir sonraki frame tekrar vurmasın [cite: 3]
+                hitbox.hit_entities.insert(hurtbox.owner);
+                
+                // Not: Eğer istersen burada Commands ile StaggerEvent de fırlatabilirsin. [cite: 1]
+            }
+        }
+    }
+}
+
+
+// Bu sistem, CombatState Active'e geçtiğinde fiziksel Hitbox'ı üretir.
+// Kendi mevcut state makinenin (FSM) içine de 
+// bu "commands.spawn" kısmını yedirebilirsin.
+pub fn spawn_hitbox_on_attack(
+    mut commands: Commands,
+    mut query: Query<(Entity, &mut CombatState, &Transform, &Weapon)>, // Weapon eklendi
+) {
+    for (attacker_entity, mut combat_state, transform, weapon) in query.iter_mut() {
+        if let CombatState::Active { ref mut hitbox_entity, attack_type, .. } = *combat_state {
+            if hitbox_entity.is_none() {
+                // Silah verisini çekiyoruz
+                if let Some(def) = weapon.attacks.get(&attack_type) {
+                    let new_hitbox = commands.spawn((
+                        Hitbox {
+                            damage: def.damage,
+                            owner: attacker_entity,
+                            hit_entities: HashSet::new(),
+                        },
+                        bevy_rapier3d::prelude::Collider::ball(def.hitbox_radius), 
+                        bevy_rapier3d::prelude::Sensor, 
+                        bevy_rapier3d::prelude::ActiveEvents::COLLISION_EVENTS, 
+                        bevy_rapier3d::prelude::ActiveCollisionTypes::default() | bevy_rapier3d::prelude::ActiveCollisionTypes::KINEMATIC_STATIC,
+                        TransformBundle::from_transform(
+                            Transform::from_translation(transform.translation + transform.rotation * def.hitbox_offset)
+                        ),
+                    )).id();
+
+                    *hitbox_entity = Some(new_hitbox);
+                    println!("HITBOX YARATILDI! Hasar: {}", def.damage);
+                }
+            }
+        }
+    }
+}
+
 
 // Farenin hareket yönüne göre saldırı niyetini belirler
 pub fn update_attack_intent(
@@ -157,56 +342,60 @@ pub fn process_attack_states(
     }
 }
 
-// YENİ SİSTEM: Çarpışmaları yakalayıp Hasar Event'ine dönüştüren sistem
+// Güncellenmiş hit_detection sistemi
 pub fn hit_detection(
     mut collision_events: EventReader<CollisionEvent>,
-    mut hitboxes: Query<&mut Hitbox>,
+    mut hitboxes: Query<&mut Hitbox>, // mut yapıldı 
+    hurtboxes: Query<&Hurtbox>,      // Yeni: Hurtbox'ları sorguluyoruz [cite: 3]
     mut damage_events: EventWriter<DamageEvent>,
     mut stagger_events: EventWriter<StaggerEvent>,
 ) {
     for event in collision_events.read() {
-        if let CollisionEvent::Started(entity1, entity2, _) = event {
-            // Hangi objenin Hitbox, hangi objenin Hedef olduğunu bilmiyoruz. İki ihtimali de deniyoruz.
-            check_and_apply_hit(*entity1, *entity2, &mut hitboxes, &mut damage_events,&mut stagger_events);
-            check_and_apply_hit(*entity2, *entity1, &mut hitboxes, &mut damage_events,&mut stagger_events);
+        if let CollisionEvent::Started(e1, e2, _) = event {
+            // İki taraflı kontrol: (e1=Hitbox, e2=Hurtbox)
+            check_and_apply_hit(*e1, *e2, &mut hitboxes, &hurtboxes, &mut damage_events, &mut stagger_events);
+            // Veya (e2=Hitbox, e1=Hurtbox)
+            check_and_apply_hit(*e2, *e1, &mut hitboxes, &hurtboxes, &mut damage_events, &mut stagger_events);
         }
     }
 }
 
-// Yardımcı fonksiyon: Hitbox'ı ve kurbanı doğrular, event fırlatır
+// Güncellenmiş yardımcı fonksiyon
 fn check_and_apply_hit(
-    potential_hitbox: Entity,
-    potential_target: Entity,
+    attacker_entity: Entity,
+    victim_entity: Entity,
     hitboxes: &mut Query<&mut Hitbox>,
+    hurtboxes: &Query<&Hurtbox>, // Hurtbox parametresi eklendi
     damage_events: &mut EventWriter<DamageEvent>,
     stagger_events: &mut EventWriter<StaggerEvent>,
 ) {
-    if let Ok(mut hitbox) = hitboxes.get_mut(potential_hitbox) {
-        // 1. Kural: Kendine hasar veremezsin
-        if hitbox.owner == potential_target {
-            return;
-        }
+    // 1. Saldırgan bir hitbox mı?
+    if let Ok(mut hitbox) = hitboxes.get_mut(attacker_entity) {
+        // 2. Kurban bir hurtbox mı?
+        if let Ok(hurtbox) = hurtboxes.get(victim_entity) {
+            
+            // Kendi kendine vurma kontrolü (Hurtbox'ın sahibi saldırgan mı?)
+            if hitbox.owner == hurtbox.owner { return; }
 
-        // 2. Kural: Bu saldırıda bu hedefe daha önce vurmadıysan vur
-        if !hitbox.hit_entities.contains(&potential_target) {
-            hitbox.hit_entities.insert(potential_target); // Hedefi hafızaya al
+            // 3. Bu saldırıda bu hedefe (owner) daha önce vurmadıysan vur
+            if !hitbox.hit_entities.contains(&hurtbox.owner) {
+                hitbox.hit_entities.insert(hurtbox.owner);
 
-            println!("HIT DETECTED! Dealing {} damage.", hitbox.damage);
-
-            // Sağlık sistemine haber ver. (Eğer hedefte Health bileşeni yoksa, Health sistemi bu olayı görmezden gelecektir.)
-            damage_events.send(DamageEvent {
-                target: potential_target,
-                amount: hitbox.damage,
-            });
-            stagger_events.send(StaggerEvent {
-                target: potential_target,
-                force: 1.0, 
-                duration: 0.25,
-            });
+                // Hasarı hurtbox'un sahibine (Health'in olduğu entity) yönlendir
+                damage_events.send(DamageEvent {
+                    target: hurtbox.owner, 
+                    amount: hitbox.damage,
+                });
+                
+                stagger_events.send(StaggerEvent {
+                    target: hurtbox.owner,
+                    force: 1.0, 
+                    duration: 0.25,
+                });
+            }
         }
     }
 }
-
 // GÜNCELLENDİ: Hangi saldırı türü olduğuna göre farklı yörüngelerde animasyon oynatır
 pub fn animate_weapon(
     entity_query: Query<(&CombatState, &Children)>,
