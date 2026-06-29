@@ -4,12 +4,14 @@ use super::components::{Enemy, EnemyAI, EnemyAIState};
 use crate::game::health::components::Health;
 use crate::game::player::components::Player;
 use crate::game::combat::components::{ StaggerEvent, CombatState,
-     Weapon, EquippedWeapon , 
-     AttackDefinition, AttackType, AttackIntent , Hurtbox };//burada neden eq. weapon var lan ,bi sorak
+      EquippedWeapon , 
+      AttackIntent , Hurtbox };//burada neden eq. weapon var lan ,bi sorak
 use crate::game::lock_on::components::Lockable;
 use crate::game::enemy::components::StaggerState;
 
-
+use crate::game::weapon::components::{Weapon ,
+     AttackDefinition, AttackType};
+use crate::game::weapon::data:: {get_weapon_data , WeaponType } ;
 use bevy::utils::HashMap;
 
 
@@ -50,32 +52,7 @@ pub fn spawn_enemy(
         },
         CombatState::default(),
         AttackIntent::default(),
-        Weapon {
-            attacks: {
-                let mut map = HashMap::new();
-                map.insert(AttackType::Thrust, AttackDefinition {
-                    windup_duration: 0.3, active_duration: 0.2, recovery_duration: 0.5,
-                    stamina_cost: 15.0, damage: 22.0,
-                    hitbox_radius: 0.3, hitbox_offset: Vec3::new(0.0, 0.8, -1.5), // İleri doğru, dar alan
-                });
-                map.insert(AttackType::Overhead, AttackDefinition {
-                    windup_duration: 0.5, active_duration: 0.2, recovery_duration: 0.7,
-                    stamina_cost: 22.0, damage: 40.0, // Ağır vuruş
-                    hitbox_radius: 0.4, hitbox_offset: Vec3::new(0.0, 0.5, -1.0), // Yakın mesafe ezme
-                });
-                map.insert(AttackType::LeftSwing, AttackDefinition {
-                    windup_duration: 0.4, active_duration: 0.2, recovery_duration: 0.6,
-                    stamina_cost: 20.0, damage: 20.0,
-                    hitbox_radius: 0.6, hitbox_offset: Vec3::new(0.0, 1.0, -0.8), // Geniş alan kontrolü
-                });
-                map.insert(AttackType::RightSwing, AttackDefinition {
-                    windup_duration: 0.4, active_duration: 0.2, recovery_duration: 0.6,
-                    stamina_cost: 20.0, damage: 20.0,
-                    hitbox_radius: 0.6, hitbox_offset: Vec3::new(0.0, 1.0, -0.8), // Geniş alan kontrolü
-                });
-                map
-            }
-        },
+        get_weapon_data(WeaponType::Spear),
 
         // --- Fizik Bileşenleri ---
         RigidBody::Dynamic, 
@@ -87,24 +64,12 @@ pub fn spawn_enemy(
         // --- SİLAH (SPEAR) ---
         // Oyuncunun mızrağının birebir aynısı düşmanın eline de bağlanıyor
         parent.spawn((
-            SpatialBundle {
-                transform: Transform::from_xyz(0.7, 0.0, -0.6)
-                    .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_4)),
-                ..default()
-            },
-            EquippedWeapon, 
-        )).with_children(|weapon_parent| {
-            weapon_parent.spawn(PbrBundle {
-                mesh: meshes.add(Cylinder { radius: 0.05, half_height: 1.0 }),
-                material: weapon_wood,
-                ..default()
-            });
-            weapon_parent.spawn(PbrBundle {
-                mesh: meshes.add(Cone { radius: 0.1, height: 0.4 }),
-                material: weapon_metal,
-                transform: Transform::from_xyz(0.0, 1.2, 0.0),
-                ..default()
-            });
-        });
+        SpatialBundle {
+            transform: Transform::from_xyz(0.7, 0.0, -0.6)
+                .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_4)),
+            ..default()
+        },
+        EquippedWeapon, // Animasyon sistemin bu markeri arıyor, onu koruyoruz
+    ));
     });
 }

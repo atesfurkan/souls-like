@@ -4,9 +4,13 @@ use crate::game::common::components::MainCamera;
 use crate::game::stamina::components::Stamina;
 use crate::game::health::components::Health;
 use crate::game::dodge::components::DodgeState;
-use crate::game::combat::components::{CombatState, Weapon, Hurtbox,
-     AttackDefinition, AttackType, AttackIntent};
+use crate::game::combat::components::{CombatState,  Hurtbox,
+      AttackIntent , EquippedWeapon};
 use crate::game::lock_on::components::LockOnState;
+
+use crate::game::weapon::components::{Weapon ,
+     AttackDefinition, AttackType};
+use crate::game::weapon::data:: {get_weapon_data , WeaponType } ;
 
 use bevy::utils::HashMap;
 
@@ -40,33 +44,9 @@ pub fn spawn_player(
         Health::new(100.0), // Oyuncunun canı
         Hurtbox { owner: player_entity }, // Oyuncunun hasar alma kutusu (sahibi kendisi)
         Stamina::default(),
-        // Mızrak istatistikleri
-        Weapon {
-            attacks: {
-                let mut map = HashMap::new();
-                map.insert(AttackType::Thrust, AttackDefinition {
-                    windup_duration: 0.3, active_duration: 0.2, recovery_duration: 0.5,
-                    stamina_cost: 15.0, damage: 25.0,
-                    hitbox_radius: 0.3, hitbox_offset: Vec3::new(0.0, 0.8, -1.5), // İleri doğru, dar alan
-                });
-                map.insert(AttackType::Overhead, AttackDefinition {
-                    windup_duration: 0.5, active_duration: 0.2, recovery_duration: 0.7,
-                    stamina_cost: 25.0, damage: 40.0, // Ağır vuruş
-                    hitbox_radius: 0.4, hitbox_offset: Vec3::new(0.0, 0.5, -1.0), // Yakın mesafe ezme
-                });
-                map.insert(AttackType::LeftSwing, AttackDefinition {
-                    windup_duration: 0.4, active_duration: 0.2, recovery_duration: 0.6,
-                    stamina_cost: 20.0, damage: 20.0,
-                    hitbox_radius: 0.6, hitbox_offset: Vec3::new(0.0, 1.0, -0.8), // Geniş alan kontrolü
-                });
-                map.insert(AttackType::RightSwing, AttackDefinition {
-                    windup_duration: 0.4, active_duration: 0.2, recovery_duration: 0.6,
-                    stamina_cost: 20.0, damage: 20.0,
-                    hitbox_radius: 0.6, hitbox_offset: Vec3::new(0.0, 1.0, -0.8), // Geniş alan kontrolü
-                });
-                map
-            }
-        },
+
+        get_weapon_data(WeaponType::Spear),
+
         RigidBody::KinematicPositionBased,
         Collider::capsule_y(0.5, 0.5), 
         KinematicCharacterController::default(),
@@ -115,34 +95,13 @@ pub fn spawn_player(
             ..default()
         });
 
-        // Yön Göstergesi (Çocuk / Child) (Göz niyetine tutulabilir veya silinebilir, şimdilik koruyoruz) [cite: 9]
-        
-        // --- SİLAH (SPEAR) ---
-        // Silah ebeveyni (Sağ elde tutuluyor gibi)
         parent.spawn((
-            SpatialBundle {
-                transform: Transform::from_xyz(0.6, 0.0, -0.5)
-                    .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_4)),
-                ..default()
-            },
-            // YENİ: Silah ebeveynine işaretçimizi ekliyoruz
-            crate::game::combat::components::EquippedWeapon, 
-        )).with_children(|weapon_parent| {
-            // Mızrak Sapı (Long cylinder shaft)
-            weapon_parent.spawn(PbrBundle {
-                mesh: meshes.add(Cylinder { radius: 0.05, half_height: 1.0 }), // Toplam boy 2.0 olur
-                material: weapon_wood,
-                transform: Transform::from_xyz(0.0, 0.0, 0.0),
-                ..default()
-            });
-
-            // Mızrak Ucu (Small cone spear tip)
-            weapon_parent.spawn(PbrBundle {
-                mesh: meshes.add(Cone { radius: 0.1, height: 0.4 }), // DÜZELTİLDİ: Doğrudan struct alanları verildi
-                material: weapon_metal,
-                transform: Transform::from_xyz(0.0, 1.2, 0.0), // Sapın hemen üstünde
-                ..default()
-            });
-        });
+        SpatialBundle {
+            transform: Transform::from_xyz(0.7, 0.0, -0.6)
+                .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_4)),
+            ..default()
+        },
+        EquippedWeapon,
+    ));
     });
 }

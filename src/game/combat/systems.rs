@@ -1,6 +1,6 @@
 use super::components::{StaggerEvent 
-    ,AttackIntent, AttackType, CombatState, 
-    EquippedWeapon, Hitbox, Weapon , Hurtbox};
+    ,AttackIntent,  CombatState, 
+    EquippedWeapon, Hitbox, Hurtbox};
 use crate::game::health::events::DamageEvent; // Event'imizi import ediyoruz
 use crate::game::lock_on::components::LockOnState;
 use crate::game::player::components::Player;
@@ -8,6 +8,7 @@ use crate::game::stamina::components::Stamina;
 use crate::game::enemy::components::StaggerState;
 use crate::game::health::components::Health;
 
+use crate::game::weapon::components::{Weapon , AttackType}; 
 
 use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;

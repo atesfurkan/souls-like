@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 use bevy::utils::{HashMap, HashSet};
-
+use crate::game::weapon::components::{Weapon, AttackDefinition, AttackType}; 
 
 
 #[derive(Component)]
@@ -16,14 +16,7 @@ pub struct StaggerEvent {
 }
 
 
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum AttackType {
-    Thrust,
-    Overhead,
-    LeftSwing,
-    RightSwing,
-}
+//attacktype vardı lan burda
 
 // O anki saldırı niyetini tutan bileşen
 #[derive(Component)]
@@ -37,24 +30,8 @@ impl Default for AttackIntent {
     }
 }
 
-// Tek bir saldırının tüm özellikleri
-#[derive(Clone)]
-pub struct AttackDefinition {
-    pub windup_duration: f32,
-    pub active_duration: f32,
-    pub recovery_duration: f32,
-    pub stamina_cost: f32,
-    pub damage: f32,
-    pub hitbox_radius: f32,
-    pub hitbox_offset: Vec3,
-}
-
-// Silah artık bir saldırı sözlüğü tutuyor
-#[derive(Component)]
-pub struct Weapon {
-    pub attacks: HashMap<AttackType, AttackDefinition>,
-}
-
+//attackdef vardı 
+//weapon vardı
 #[derive(Component, Default)]
 pub enum CombatState {
     #[default]

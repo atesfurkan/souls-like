@@ -1,0 +1,78 @@
+=== FILE: health/plugin.rs ===
+use bevy::prelude::*;
+use super::events::DamageEvent;
+use super::systems::{check_death, process_damage};
+
+pub struct HealthPlugin;
+
+impl Plugin for HealthPlugin {
+    fn build(&self, app: &mut App) {
+        // Event'i sisteme kaydediyoruz
+        app.add_event::<DamageEvent>()
+           // chain() ile önce hasarın düşülmesini, hemen ardından ölüm kontrolü yapılmasını garanti ediyoruz
+           .add_systems(Update, (process_damage, check_death).chain());
+    }
+}
+
+=== FILE: health/mod.rs ===
+pub mod components;
+pub mod events;
+pub mod plugin;
+pub mod systems;
+
+=== FILE: health/components.rs ===
+use bevy::prelude::*;
+
+#[derive(Component)]
+pub struct Health {
+    pub current: f32,
+    pub max: f32,
+}
+
+impl Health {
+    pub fn new(max_health: f32) -> Self {
+        Self {
+            current: max_health,
+            max: max_health,
+        }
+    }
+}
+
+=== FILE: health/events.rs ===
+use bevy::prelude::*;
+
+#[derive(Event)]
+pub struct DamageEvent {
+    pub target: Entity, // Hasarı kim alıyor?
+    pub amount: f32,    // Ne kadar hasar alıyor?
+}
+
+=== FILE: health/systems.rs ===
+use bevy::prelude::*;
+use super::components::Health;
+use super::events::DamageEvent;
+
+pub fn process_damage(
+    mut events: EventReader<DamageEvent>,
+    mut health_query: Query<&mut Health>,
+) {
+    for ev in events.read() {
+        // Eğer hasar alan entity'nin Health componenti varsa canını düşür
+        if let Ok(mut health) = health_query.get_mut(ev.target) {
+            health.current -= ev.amount;
+        }
+    }
+}
+
+pub fn check_death(
+    mut commands: Commands,
+    query: Query<(Entity, &Health)>,
+) {
+    for (entity, health) in query.iter() {
+        if health.current <= 0.0 {
+            // Canı sıfırlanan entity'i ve tüm çocuklarını (varsa silahı, zırhı vs) dünyadan sil
+            commands.entity(entity).despawn_recursive();
+        }
+    }
+}
+

@@ -3,9 +3,11 @@ use bevy_rapier3d::prelude::*;
 use crate::game::common::components::MainCamera;
 use crate::game::stamina::components::Stamina;
 use crate::game::dodge::components::DodgeState;
-use crate::game::combat::components::{CombatState, Weapon,
-     AttackDefinition, AttackType, AttackIntent};
+use crate::game::combat::components::{CombatState, 
+      AttackIntent};
 use crate::game::lock_on::components::LockOnState;
+
+use crate::game::weapon::components::{Weapon, AttackDefinition, AttackType};
 
 use bevy::utils::HashMap;
 

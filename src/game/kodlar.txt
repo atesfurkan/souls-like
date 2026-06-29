@@ -1,3 +1,40 @@
+=== FILE: combat/plugin.rs ===
+use bevy::prelude::*;
+use super::systems::{  handle_attacks, process_attack_states, 
+    hit_detection, animate_weapon, update_attack_intent, 
+    spawn_hitbox_on_attack, hit_registration_system, cleanup_hitboxes , 
+    };
+use super::components::StaggerEvent;
+use crate::game::enemy::systems::{handle_stagger_events,process_stagger}  ;
+
+pub struct CombatPlugin;
+
+
+
+impl Plugin for CombatPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_event::<StaggerEvent>();
+        app.add_systems(Update, (
+            update_attack_intent, // YENİ: Fareden niyet okuma ilk sırada çalışmalı
+            handle_attacks, 
+            process_attack_states,
+            hit_detection,
+            animate_weapon,
+            handle_stagger_events, 
+            process_stagger,
+            spawn_hitbox_on_attack,
+            hit_registration_system,
+            cleanup_hitboxes,
+            
+        ).chain());
+    }
+}
+
+=== FILE: combat/mod.rs ===
+pub mod components;
+pub mod plugin;
+pub mod systems;
+
 === FILE: combat/components.rs ===
 use bevy::prelude::*;
 use bevy::utils::{HashMap, HashSet};
@@ -76,23 +113,663 @@ pub struct Hitbox {
 #[derive(Component)]
 pub struct EquippedWeapon;
 
-=== FILE: health/components.rs ===
+=== FILE: combat/systems.rs ===
+use super::components::{StaggerEvent 
+    ,AttackIntent, AttackType, CombatState, 
+    EquippedWeapon, Hitbox, Weapon , Hurtbox};
+use crate::game::health::events::DamageEvent; // Event'imizi import ediyoruz
+use crate::game::lock_on::components::LockOnState;
+use crate::game::player::components::Player;
+use crate::game::stamina::components::Stamina;
+use crate::game::enemy::components::StaggerState;
+use crate::game::health::components::Health;
+
+
+use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
+use bevy::utils::HashSet;
+use bevy_rapier3d::prelude::*;
 
-#[derive(Component)]
-pub struct Health {
-    pub current: f32,
-    pub max: f32,
-}
 
-impl Health {
-    pub fn new(max_health: f32) -> Self {
-        Self {
-            current: max_health,
-            max: max_health,
+// 1. GERÇEK OYUNCU GİRDİSİ (Senin AttackIntent yapınla)
+pub fn player_attack_input(
+    mouse_input: Res<ButtonInput<MouseButton>>,
+    mut query: Query<(&mut CombatState, &Weapon, &AttackIntent),
+    With<Player>>,
+    
+) {
+    if mouse_input.just_pressed(MouseButton::Left) {
+        for (mut state, weapon, intent) in query.iter_mut() {
+            // Sadece Idle durumundayken saldırılabilir
+            if let CombatState::Idle = *state {
+                // Karakterin mevcut niyetini (Mızrak için Thrust) çekiyoruz
+                if let Some(def) = weapon.attacks.get(&intent.current) {
+                    // Senin Weapon bileşenindeki süreleri kullanıyoruz
+                    *state = CombatState::Windup {
+                        timer: Timer::from_seconds(def.windup_duration, TimerMode::Once),
+                        attack_type: intent.current,
+                    };
+                    println!("Mızrak saldırısı tetiklendi: {:?}", intent.current);
+                }
+            }
         }
     }
 }
+
+// 2. SAVAŞ DURUM MAKİNESİ (Senin orijinal silah sürelerini kullanır)
+pub fn combat_state_machine(
+    time: Res<Time>,
+    mut query: Query<(&mut CombatState, &Weapon)>,
+) {
+    for (mut state, weapon) in query.iter_mut() {
+        let mut next_state = None;
+
+        match *state {
+            CombatState::Windup { ref mut timer, attack_type } => {
+                timer.tick(time.delta());
+                if timer.just_finished() {
+                    let def = weapon.attacks.get(&attack_type).unwrap();
+                    next_state = Some(CombatState::Active {
+                        timer: Timer::from_seconds(def.active_duration, TimerMode::Once),
+                        hitbox_entity: None,
+                        attack_type,
+                    });
+                }
+            }
+            CombatState::Active { ref mut timer, attack_type, .. } => {
+                timer.tick(time.delta());
+                if timer.just_finished() {
+                    let def = weapon.attacks.get(&attack_type).unwrap();
+                    next_state = Some(CombatState::Recovery {
+                        timer: Timer::from_seconds(def.recovery_duration, TimerMode::Once),
+                        attack_type,
+                    });
+                }
+            }
+            CombatState::Recovery { ref mut timer, .. } => {
+                timer.tick(time.delta());
+                if timer.just_finished() {
+                    next_state = Some(CombatState::Idle);
+                }
+            }
+            CombatState::Idle => {}
+        }
+
+        if let Some(new_state) = next_state {
+            *state = new_state;
+        }
+    }
+}
+
+
+
+pub fn cleanup_hitboxes(
+    mut commands: Commands,
+    hitbox_query: Query<(Entity, &Hitbox)>,
+    owner_query: Query<&CombatState>,
+) {
+    for (hitbox_entity, hitbox) in hitbox_query.iter() {
+        // Hitbox'ın sahibinin (Player/Enemy) mevcut durumunu al
+        if let Ok(combat_state) = owner_query.get(hitbox.owner) {
+            
+            // Eğer sahibi artık 'Active' durumunda DEĞİLSE, saldırı bitmiş demektir. Hitbox'ı sil!
+            if !matches!(combat_state, CombatState::Active { .. }) {
+                commands.entity(hitbox_entity).despawn();
+            }
+            
+        } else {
+            // Eğer hitbox'ın sahibi (owner) oyundan tamamen despawn olduysa yetim kalan hitbox'ı sil
+            commands.entity(hitbox_entity).despawn();
+        }
+    }
+}
+
+pub fn hit_registration_system(
+    mut collision_events: EventReader<CollisionEvent>,
+    mut hitbox_query: Query<&mut Hitbox>,
+    hurtbox_query: Query<&Hurtbox>,
+    mut health_query: Query<&mut Health>,
+) {
+    for collision_event in collision_events.read() {
+        // Sadece kesişme başladığında çalışsın (Started)
+        if let CollisionEvent::Started(entity1, entity2, _) = collision_event {
+            
+            // Hangi Entity Hitbox, hangisi Hurtbox? Bunu belirle.
+            let (hitbox_entity, hurtbox_entity) = if hitbox_query.contains(*entity1) && hurtbox_query.contains(*entity2) {
+                (*entity1, *entity2)
+            } else if hitbox_query.contains(*entity2) && hurtbox_query.contains(*entity1) {
+                (*entity2, *entity1)
+            } else {
+                continue; // İkisi de Hitbox/Hurtbox eşleşmesi değilse pas geç
+            };
+
+            // Bileşenleri güvenli bir şekilde al
+            let Ok(mut hitbox) = hitbox_query.get_mut(hitbox_entity) else { continue };
+            let Ok(hurtbox) = hurtbox_query.get(hurtbox_entity) else { continue };
+
+            // 1. Kendi kendine vurmayı engelle (Player kendi kılıcıyla vurulmasın)
+            if hitbox.owner == hurtbox.owner { continue; }
+
+            // 2. Double Hit (Tek saldırıda çoklu hasar) engelleme
+            // Eğer bu Hurtbox'ın sahibi zaten vurulanlar listesindeyse, işlemi iptal et
+            if hitbox.hit_entities.contains(&hurtbox.owner) { continue; }
+
+            // 3. Health Pipeline Entegrasyonu
+            // Hasarı kime uygulayacağız? Hurtbox'ın owner'ına (Player veya Enemy) [cite: 1]
+            if let Ok(mut health) = health_query.get_mut(hurtbox.owner) {
+                
+                // Hasarı uygula [cite: 4]
+                health.current -= hitbox.damage;
+                
+                println!(
+                    "HIT REGISTERED! Entity {:?} dealt {} damage to Entity {:?}. Target Health: {}/{}",
+                    hitbox.owner, hitbox.damage, hurtbox.owner, health.current, health.max
+                );
+
+                // 4. Hitbox'a bu hedefi vurduğunu kaydet ki bir sonraki frame tekrar vurmasın [cite: 3]
+                hitbox.hit_entities.insert(hurtbox.owner);
+                
+                // Not: Eğer istersen burada Commands ile StaggerEvent de fırlatabilirsin. [cite: 1]
+            }
+        }
+    }
+}
+
+
+// Bu sistem, CombatState Active'e geçtiğinde fiziksel Hitbox'ı üretir.
+// Kendi mevcut state makinenin (FSM) içine de 
+// bu "commands.spawn" kısmını yedirebilirsin.
+pub fn spawn_hitbox_on_attack(
+    mut commands: Commands,
+    mut query: Query<(Entity, &mut CombatState, &Transform, &Weapon)>, // Weapon eklendi
+) {
+    for (attacker_entity, mut combat_state, transform, weapon) in query.iter_mut() {
+        if let CombatState::Active { ref mut hitbox_entity, attack_type, .. } = *combat_state {
+            if hitbox_entity.is_none() {
+                // Silah verisini çekiyoruz
+                if let Some(def) = weapon.attacks.get(&attack_type) {
+                    let new_hitbox = commands.spawn((
+                        Hitbox {
+                            damage: def.damage,
+                            owner: attacker_entity,
+                            hit_entities: HashSet::new(),
+                        },
+                        bevy_rapier3d::prelude::Collider::ball(def.hitbox_radius), 
+                        bevy_rapier3d::prelude::Sensor, 
+                        bevy_rapier3d::prelude::ActiveEvents::COLLISION_EVENTS, 
+                        bevy_rapier3d::prelude::ActiveCollisionTypes::default() | bevy_rapier3d::prelude::ActiveCollisionTypes::KINEMATIC_STATIC,
+                        TransformBundle::from_transform(
+                            Transform::from_translation(transform.translation + transform.rotation * def.hitbox_offset)
+                        ),
+                    )).id();
+
+                    *hitbox_entity = Some(new_hitbox);
+                    println!("HITBOX YARATILDI! Hasar: {}", def.damage);
+                }
+            }
+        }
+    }
+}
+
+
+// Farenin hareket yönüne göre saldırı niyetini belirler
+pub fn update_attack_intent(
+    mut motion_evr: EventReader<MouseMotion>,
+    lock_on: Res<LockOnState>, // YENİ EKLENDİ
+    mut query: Query<&mut AttackIntent, With<Player>>,
+) {
+    let Ok(mut intent) = query.get_single_mut() else {
+        return;
+    };
+
+    // --- 1. DURUM: Kilitlenme Yok (Serbest Kamera) ---
+    if lock_on.target.is_none() {
+        // Fare kamerayı kontrol ettiği için yön okumasını atlıyoruz
+        // ve niyetimizi "Default (Varsayılan)" bir saldırıya sabitliyoruz.
+        // İstersen Thrust yerine RightSwing de yapabilirsin.
+        intent.current = AttackType::Thrust;
+
+        // Event'leri okuyup tüketmek (flush) iyi bir pratiktir,
+        // böylece kilitlenme açıldığında eski hareketler birikmiş olmaz.
+        for _ in motion_evr.read() {}
+        return;
+    }
+
+    // --- 2. DURUM: Kilitlenme Var (Savaş Duruşu) ---
+    // Fare artık kamerayı kontrol etmiyor, o yüzden yön okuyabiliriz!
+    let mut total_delta = Vec2::ZERO;
+    for ev in motion_evr.read() {
+        total_delta += ev.delta;
+    }
+
+    // Yeterince belirgin bir fare hareketi varsa niyeti değiştir
+    let threshold = 5.0;
+    if total_delta.length() > threshold {
+        if total_delta.x.abs() > total_delta.y.abs() {
+            // Yatay hareket baskın
+            if total_delta.x > 0.0 {
+                intent.current = AttackType::LeftSwing;
+            } else {
+                intent.current = AttackType::RightSwing;
+            }
+        } else {
+            // Dikey hareket baskın (Bevy'de Y+ aşağı, Y- yukarı demektir)
+            if total_delta.y > 0.0 {
+                intent.current = AttackType::Thrust; // Aşağı çekme
+            } else {
+                intent.current = AttackType::Overhead; // İleri itme
+            }
+        }
+    }
+}
+
+// GÜNCELLENDİ: Sol tıklandığında niyet edilen saldırıyı başlatır
+pub fn handle_attacks(
+    mouse: Res<ButtonInput<MouseButton>>,
+    mut query: Query<(&mut CombatState, &Weapon, &mut Stamina, &AttackIntent), With<Player>>,
+) {
+    let Ok((mut combat_state, weapon, mut stamina, intent)) = query.get_single_mut() else {
+        return;
+    };
+
+    if matches!(*combat_state, CombatState::Idle) && mouse.just_pressed(MouseButton::Left) {
+        // Niyet edilen saldırının verilerini silahtan çek
+        if let Some(attack_def) = weapon.attacks.get(&intent.current) {
+            if stamina.try_drain(attack_def.stamina_cost) {
+                *combat_state = CombatState::Windup {
+                    timer: Timer::from_seconds(attack_def.windup_duration, TimerMode::Once),
+                    attack_type: intent.current,
+                };
+            }
+        }
+    }
+}
+
+// GÜNCELLENDİ: Durumları ve Hitboxları ilgili saldırı türüne göre işler
+pub fn process_attack_states(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut query: Query<(Entity, &mut CombatState, &Weapon)>,
+) {
+    for (entity, mut combat_state, weapon) in query.iter_mut() {
+        let mut next_state = None;
+
+        match &mut *combat_state {
+            CombatState::Idle => {}
+            CombatState::Windup { timer, attack_type } => {
+                timer.tick(time.delta());
+                if timer.just_finished() {
+                    let attack_def = weapon.attacks.get(attack_type).unwrap();
+                    let hitbox_entity = commands
+                        .spawn((
+                            Hitbox {
+                                damage: attack_def.damage,
+                                owner: entity,
+                                hit_entities: HashSet::new(),
+                            },
+                            Collider::ball(attack_def.hitbox_radius),
+                            Sensor,
+                            ActiveEvents::COLLISION_EVENTS,
+                            TransformBundle::from_transform(Transform::from_translation(
+                                attack_def.hitbox_offset,
+                            )),
+                        ))
+                        .id();
+
+                    commands.entity(entity).add_child(hitbox_entity);
+
+                    next_state = Some(CombatState::Active {
+                        timer: Timer::from_seconds(attack_def.active_duration, TimerMode::Once),
+                        hitbox_entity: Some(hitbox_entity),
+                        attack_type: *attack_type,
+                    });
+                }
+            }
+            CombatState::Active {
+                timer,
+                hitbox_entity,
+                attack_type,
+            } => {
+                timer.tick(time.delta());
+                if timer.just_finished() {
+                    if let Some(h_entity) = hitbox_entity {
+                        if let Some(mut entity_cmd) = commands.get_entity(*h_entity) {
+                            entity_cmd.despawn_recursive();
+                        }
+                    }
+                    let attack_def = weapon.attacks.get(attack_type).unwrap();
+                    next_state = Some(CombatState::Recovery {
+                        timer: Timer::from_seconds(attack_def.recovery_duration, TimerMode::Once),
+                        attack_type: *attack_type,
+                    });
+                }
+            }
+            CombatState::Recovery { timer, .. } => {
+                timer.tick(time.delta());
+                if timer.just_finished() {
+                    next_state = Some(CombatState::Idle);
+                }
+            }
+        }
+
+        if let Some(state) = next_state {
+            *combat_state = state;
+        }
+    }
+}
+
+// Güncellenmiş hit_detection sistemi
+pub fn hit_detection(
+    mut collision_events: EventReader<CollisionEvent>,
+    mut hitboxes: Query<&mut Hitbox>, // mut yapıldı 
+    hurtboxes: Query<&Hurtbox>,      // Yeni: Hurtbox'ları sorguluyoruz [cite: 3]
+    mut damage_events: EventWriter<DamageEvent>,
+    mut stagger_events: EventWriter<StaggerEvent>,
+) {
+    for event in collision_events.read() {
+        if let CollisionEvent::Started(e1, e2, _) = event {
+            // İki taraflı kontrol: (e1=Hitbox, e2=Hurtbox)
+            check_and_apply_hit(*e1, *e2, &mut hitboxes, &hurtboxes, &mut damage_events, &mut stagger_events);
+            // Veya (e2=Hitbox, e1=Hurtbox)
+            check_and_apply_hit(*e2, *e1, &mut hitboxes, &hurtboxes, &mut damage_events, &mut stagger_events);
+        }
+    }
+}
+
+// Güncellenmiş yardımcı fonksiyon
+fn check_and_apply_hit(
+    attacker_entity: Entity,
+    victim_entity: Entity,
+    hitboxes: &mut Query<&mut Hitbox>,
+    hurtboxes: &Query<&Hurtbox>, // Hurtbox parametresi eklendi
+    damage_events: &mut EventWriter<DamageEvent>,
+    stagger_events: &mut EventWriter<StaggerEvent>,
+) {
+    // 1. Saldırgan bir hitbox mı?
+    if let Ok(mut hitbox) = hitboxes.get_mut(attacker_entity) {
+        // 2. Kurban bir hurtbox mı?
+        if let Ok(hurtbox) = hurtboxes.get(victim_entity) {
+            
+            // Kendi kendine vurma kontrolü (Hurtbox'ın sahibi saldırgan mı?)
+            if hitbox.owner == hurtbox.owner { return; }
+
+            // 3. Bu saldırıda bu hedefe (owner) daha önce vurmadıysan vur
+            if !hitbox.hit_entities.contains(&hurtbox.owner) {
+                hitbox.hit_entities.insert(hurtbox.owner);
+
+                // Hasarı hurtbox'un sahibine (Health'in olduğu entity) yönlendir
+                damage_events.send(DamageEvent {
+                    target: hurtbox.owner, 
+                    amount: hitbox.damage,
+                });
+                
+                stagger_events.send(StaggerEvent {
+                    target: hurtbox.owner,
+                    force: 1.0, 
+                    duration: 0.25,
+                });
+            }
+        }
+    }
+}
+// GÜNCELLENDİ: Hangi saldırı türü olduğuna göre farklı yörüngelerde animasyon oynatır
+pub fn animate_weapon(
+    entity_query: Query<(&CombatState, &Children)>,
+    mut weapon_query: Query<&mut Transform, With<EquippedWeapon>>,
+) {
+    for (state, children) in entity_query.iter() {
+        let Some(&weapon_entity) = children.iter().find(|&&child| weapon_query.contains(child))
+        else {
+            continue;
+        };
+        let Ok(mut transform) = weapon_query.get_mut(weapon_entity) else {
+            continue;
+        };
+
+        let idle_pos = Vec3::new(0.6, 0.0, -0.5);
+        let idle_rot = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_4);
+
+        match state {
+            CombatState::Idle => {
+                transform.translation = idle_pos;
+                transform.rotation = idle_rot;
+            }
+            CombatState::Windup { timer, attack_type } => {
+                let t = timer.fraction();
+                let (windup_pos, windup_rot) = get_windup_transform(*attack_type);
+                transform.translation = idle_pos.lerp(windup_pos, t);
+                transform.rotation = idle_rot.slerp(windup_rot, t);
+            }
+            CombatState::Active {
+                timer, attack_type, ..
+            } => {
+                let t = timer.fraction();
+                let (windup_pos, windup_rot) = get_windup_transform(*attack_type);
+                let (active_pos, active_rot) = get_active_transform(*attack_type);
+                transform.translation = windup_pos.lerp(active_pos, t);
+                transform.rotation = windup_rot.slerp(active_rot, t);
+            }
+            CombatState::Recovery { timer, attack_type } => {
+                let t = timer.fraction();
+                let (active_pos, active_rot) = get_active_transform(*attack_type);
+                transform.translation = active_pos.lerp(idle_pos, t);
+                transform.rotation = active_rot.slerp(idle_rot, t);
+            }
+        }
+    }
+}
+
+// YARDIMCI FONKSİYONLAR: Farklı saldırılar için keyframe (anahtar kare) konumları
+fn get_windup_transform(attack: AttackType) -> (Vec3, Quat) {
+    match attack {
+        AttackType::Thrust => (Vec3::new(0.6, 0.5, 0.2), Quat::from_rotation_x(-0.1)),
+        AttackType::Overhead => (Vec3::new(0.0, 1.5, 0.0), Quat::from_rotation_x(0.5)),
+        AttackType::LeftSwing => (
+            Vec3::new(-0.8, 0.5, -0.2),
+            Quat::from_rotation_y(std::f32::consts::FRAC_PI_4),
+        ),
+        AttackType::RightSwing => (
+            Vec3::new(1.2, 0.5, -0.2),
+            Quat::from_rotation_y(-std::f32::consts::FRAC_PI_4),
+        ),
+    }
+}
+
+fn get_active_transform(attack: AttackType) -> (Vec3, Quat) {
+    match attack {
+        AttackType::Thrust => (
+            Vec3::new(0.0, 0.8, -1.3),
+            Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+        ),
+        AttackType::Overhead => (
+            Vec3::new(0.0, 0.2, -1.2),
+            Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+        ),
+        AttackType::LeftSwing => (
+            Vec3::new(1.0, 0.5, -1.0),
+            Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2)
+                * Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+        ),
+        AttackType::RightSwing => (
+            Vec3::new(-1.0, 0.5, -1.0),
+            Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)
+                * Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+        ),
+    }
+}
+
+=== FILE: player/plugin.rs ===
+use bevy::prelude::*;
+use super::systems::player_movement;
+//use super::spawn::spawn_player;
+use super::components::{Player, PlayerState, PlayerMovementConfig};
+use crate::game::player::spawn::spawn_player;
+
+
+pub struct PlayerPlugin;
+
+impl Plugin for PlayerPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<PlayerMovementConfig>() // Config sisteme kaydedildi
+           .add_systems(Startup, spawn_player)
+           .add_systems(Update, player_movement);
+    }
+}
+
+=== FILE: player/spawn.rs ===
+use bevy::prelude::*;
+use bevy_rapier3d::prelude::*;
+use crate::game::common::components::MainCamera;
+use crate::game::stamina::components::Stamina;
+use crate::game::health::components::Health;
+use crate::game::dodge::components::DodgeState;
+use crate::game::combat::components::{CombatState, Weapon, Hurtbox,
+     AttackDefinition, AttackType, AttackIntent};
+use crate::game::lock_on::components::LockOnState;
+
+use bevy::utils::HashMap;
+
+use super::components::{Player, PlayerState, PlayerMovementConfig}; 
+
+pub fn spawn_player(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+)  {
+    let player_entity = commands.spawn_empty().id();
+    // Materyalleri hazırlayalım
+    let body_material = materials.add(Color::srgb(0.2, 0.5, 0.8));
+    let skin_material = materials.add(Color::srgb(0.9, 0.7, 0.6));
+    let weapon_wood = materials.add(Color::srgb(0.4, 0.2, 0.1));
+    let weapon_metal = materials.add(Color::srgb(0.8, 0.8, 0.8));
+
+    // Ana oyuncu kapsülü (Ebeveyn / Parent) 
+    commands.entity(player_entity).insert((
+        PbrBundle {
+            mesh: meshes.add(Capsule3d { radius: 0.5, half_length: 0.5 }),
+            material: body_material.clone(),
+            transform: Transform::from_xyz(0.0, 3.0, 0.0),
+            ..default()
+        },
+        Player,
+        PlayerState::default(),
+        CombatState::default(), // Başlangıçta Idle
+        AttackIntent::default(), 
+        // --- YENİ EKLENEN SİSTEMLER ---
+        Health::new(100.0), // Oyuncunun canı
+        Hurtbox { owner: player_entity }, // Oyuncunun hasar alma kutusu (sahibi kendisi)
+        Stamina::default(),
+        // Mızrak istatistikleri
+        Weapon {
+            attacks: {
+                let mut map = HashMap::new();
+                map.insert(AttackType::Thrust, AttackDefinition {
+                    windup_duration: 0.3, active_duration: 0.2, recovery_duration: 0.5,
+                    stamina_cost: 15.0, damage: 25.0,
+                    hitbox_radius: 0.3, hitbox_offset: Vec3::new(0.0, 0.8, -1.5), // İleri doğru, dar alan
+                });
+                map.insert(AttackType::Overhead, AttackDefinition {
+                    windup_duration: 0.5, active_duration: 0.2, recovery_duration: 0.7,
+                    stamina_cost: 25.0, damage: 40.0, // Ağır vuruş
+                    hitbox_radius: 0.4, hitbox_offset: Vec3::new(0.0, 0.5, -1.0), // Yakın mesafe ezme
+                });
+                map.insert(AttackType::LeftSwing, AttackDefinition {
+                    windup_duration: 0.4, active_duration: 0.2, recovery_duration: 0.6,
+                    stamina_cost: 20.0, damage: 20.0,
+                    hitbox_radius: 0.6, hitbox_offset: Vec3::new(0.0, 1.0, -0.8), // Geniş alan kontrolü
+                });
+                map.insert(AttackType::RightSwing, AttackDefinition {
+                    windup_duration: 0.4, active_duration: 0.2, recovery_duration: 0.6,
+                    stamina_cost: 20.0, damage: 20.0,
+                    hitbox_radius: 0.6, hitbox_offset: Vec3::new(0.0, 1.0, -0.8), // Geniş alan kontrolü
+                });
+                map
+            }
+        },
+        RigidBody::KinematicPositionBased,
+        Collider::capsule_y(0.5, 0.5), 
+        KinematicCharacterController::default(),
+        
+    ))
+    .with_children(|parent| {
+        // --- ANATOMİ ---
+        
+        // Kafa (Sphere)
+        parent.spawn(PbrBundle {
+            mesh: meshes.add(Sphere { radius: 0.35 }), // DÜZELTİLDİ
+            material: skin_material.clone(),
+            transform: Transform::from_xyz(0.0, 0.9, 0.0), // Kapsülün tam üstünde
+            ..default()
+        });
+
+        // Sol Kol (Cylinder)
+        parent.spawn(PbrBundle {
+            mesh: meshes.add(Cylinder { radius: 0.12, half_height: 0.35 }), // DÜZELTİLDİ (half_height kullanır)
+            material: skin_material.clone(),
+            transform: Transform::from_xyz(-0.6, 0.2, 0.0),
+            ..default()
+        });
+
+        // Sağ Kol (Cylinder)
+        parent.spawn(PbrBundle {
+            mesh: meshes.add(Cylinder { radius: 0.12, half_height: 0.35 }), // DÜZELTİLDİ
+            material: skin_material.clone(),
+            transform: Transform::from_xyz(0.6, 0.2, 0.0),
+            ..default()
+        });
+
+        // Sol Bacak (Cylinder)
+        parent.spawn(PbrBundle {
+            mesh: meshes.add(Cylinder { radius: 0.15, half_height: 0.4 }), // DÜZELTİLDİ
+            material: body_material.clone(),
+            transform: Transform::from_xyz(-0.25, -0.9, 0.0),
+            ..default()
+        });
+
+        // Sağ Bacak (Cylinder)
+        parent.spawn(PbrBundle {
+            mesh: meshes.add(Cylinder { radius: 0.15, half_height: 0.4 }), // DÜZELTİLDİ
+            material: body_material.clone(),
+            transform: Transform::from_xyz(0.25, -0.9, 0.0),
+            ..default()
+        });
+
+        // Yön Göstergesi (Çocuk / Child) (Göz niyetine tutulabilir veya silinebilir, şimdilik koruyoruz) [cite: 9]
+        
+        // --- SİLAH (SPEAR) ---
+        // Silah ebeveyni (Sağ elde tutuluyor gibi)
+        parent.spawn((
+            SpatialBundle {
+                transform: Transform::from_xyz(0.6, 0.0, -0.5)
+                    .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_4)),
+                ..default()
+            },
+            // YENİ: Silah ebeveynine işaretçimizi ekliyoruz
+            crate::game::combat::components::EquippedWeapon, 
+        )).with_children(|weapon_parent| {
+            // Mızrak Sapı (Long cylinder shaft)
+            weapon_parent.spawn(PbrBundle {
+                mesh: meshes.add(Cylinder { radius: 0.05, half_height: 1.0 }), // Toplam boy 2.0 olur
+                material: weapon_wood,
+                transform: Transform::from_xyz(0.0, 0.0, 0.0),
+                ..default()
+            });
+
+            // Mızrak Ucu (Small cone spear tip)
+            weapon_parent.spawn(PbrBundle {
+                mesh: meshes.add(Cone { radius: 0.1, height: 0.4 }), // DÜZELTİLDİ: Doğrudan struct alanları verildi
+                material: weapon_metal,
+                transform: Transform::from_xyz(0.0, 1.2, 0.0), // Sapın hemen üstünde
+                ..default()
+            });
+        });
+    });
+}
+=== FILE: player/mod.rs ===
+pub mod components;
+pub mod plugin;
+pub mod systems;
+pub mod spawn;
 
 === FILE: player/components.rs ===
 use bevy::prelude::Component;
@@ -127,16 +804,241 @@ pub struct PlayerState {
 #[derive(Component)]
 pub struct Player;
 
-=== FILE: common/components.rs ===
-use bevy::prelude::Component;
+=== FILE: player/systems.rs ===
+use bevy::prelude::*;
+use bevy_rapier3d::prelude::*;
+use crate::game::common::components::MainCamera;
+use crate::game::stamina::components::Stamina;
+use crate::game::dodge::components::DodgeState;
+use crate::game::combat::components::{CombatState, Weapon,
+     AttackDefinition, AttackType, AttackIntent};
+use crate::game::lock_on::components::LockOnState;
 
-#[derive(Component)]
-pub struct MainCamera {
-    pub distance: f32,
-    pub pitch: f32,
-    pub yaw: f32,
+use bevy::utils::HashMap;
+
+use super::components::{Player, PlayerState, PlayerMovementConfig}; 
+
+
+pub fn player_movement(
+    keys: Res<ButtonInput<KeyCode>>,
+    time: Res<Time>,
+    config: Res<PlayerMovementConfig>, 
+    lock_on: Res<LockOnState>,
+    mut player_query: Query<(
+        &mut Transform, 
+        &mut KinematicCharacterController,
+        Option<&KinematicCharacterControllerOutput>, //Yere değme kontrolü
+        &mut PlayerState, //  Dikey hız hafızası
+        &mut Stamina,
+    ), (With<Player>, Without<DodgeState>)>,
+    camera_query: Query<&Transform, (With<MainCamera>, Without<Player>)>,
+    target_query: Query<&Transform, (Without<Player>, Without<MainCamera>)>, //  (Hedefin pozisyonunu almak için)
+) {
+    let Ok((mut player_transform, mut controller, output, mut state, mut stamina)) = player_query.get_single_mut() else { return };
+    let Ok(camera_transform) = camera_query.get_single() else { return };
+
+    let mut direction = Vec3::ZERO;
+
+    let forward = camera_transform.forward();
+    let forward_flat = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
+    let right = camera_transform.right();
+    let right_flat = Vec3::new(right.x, 0.0, right.z).normalize_or_zero();
+
+    if keys.pressed(KeyCode::KeyW) { direction += forward_flat; }
+    if keys.pressed(KeyCode::KeyS) { direction -= forward_flat; }
+    if keys.pressed(KeyCode::KeyD) { direction += right_flat; }
+    if keys.pressed(KeyCode::KeyA) { direction -= right_flat; }
+
+    // Sprint Mantığı: Shift'e basılıysa sprint hızını, değilse yürüme hızını al
+    // --- SPRINT MANTIĞI GÜNCELLENDİ ---
+    let mut speed = config.walk_speed;
+    
+    // Karakter hareket ediyorsa ve Shift'e basılıysa
+    if keys.pressed(KeyCode::ShiftLeft) && direction != Vec3::ZERO {
+        let cost = stamina.sprint_cost * time.delta_seconds();
+        
+        // Staminada yer varsa sprint yap ve staminayı tüket
+        if stamina.try_drain(cost) {
+            speed = config.sprint_speed;
+        }
+    }
+    let mut movement = direction.normalize_or_zero() * speed * time.delta_seconds();
+
+    // Zıplama ve Yerçekimi Mantığı
+    // Rapier çıktısı henüz oluşmadıysa (ilk frame) false kabul et
+    let is_grounded = match output {
+        Some(out) => out.grounded,
+        None => false,
+    };
+
+    if is_grounded {
+        // Yerdeysek hafif eksi hız vererek zemine yapışık kalmasını sağla
+        state.vertical_velocity = -0.1; 
+        
+        // Sadece yerdeyken Space tuşuna basıldığında zıpla
+        if keys.just_pressed(KeyCode::Space) {
+            let cost = stamina.jump_cost ;
+            state.vertical_velocity = config.jump_velocity;
+            stamina.try_drain(cost);
+        }
+    } else {
+        // Havadaysak yerçekimini dikey hıza uygula (ivmelenme)
+        state.vertical_velocity += config.gravity * time.delta_seconds();
+    }
+    // Dikey hızı (Y ekseni) asıl harekete dahil et
+    movement.y = state.vertical_velocity * time.delta_seconds();
+    controller.translation = Some(movement);
+
+    // --- GÜNCELLENEN ROTASYON MANTIĞI (STRAFING) ---
+    // Eğer lock-on aktifse ve hedef dünyadaysa
+    if let Some(target_entity) = lock_on.target {
+        if let Ok(target_transform) = target_query.get(target_entity) {
+            // Karakterin Y (yukarı/aşağı) eğilmesini engellemek için sadece X ve Z eksenine bakıyoruz
+            let target_pos = Vec3::new(
+                target_transform.translation.x, 
+                player_transform.translation.y, 
+                target_transform.translation.z
+            );
+            player_transform.look_at(target_pos, Vec3::Y);
+        }
+    } else {
+        // Lock-on yoksa serbest hareket (Gidilen yöne dön)
+        if direction != Vec3::ZERO {
+            let target_position = player_transform.translation + direction;
+            player_transform.look_at(target_position, Vec3::Y);
+        }
+    }
 }
 
+=== FILE: enemy/plugin.rs ===
+use bevy::prelude::*;
+use super::systems::enemy_ai_system;
+use super::spawn::spawn_enemy;
+pub struct EnemyPlugin;
+
+impl Plugin for EnemyPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Startup, spawn_enemy)
+           .add_systems(Update, enemy_ai_system);
+    }
+}
+
+=== FILE: enemy/spawn.rs ===
+use bevy::prelude::*;
+use bevy_rapier3d::prelude::*;
+use super::components::{Enemy, EnemyAI, EnemyAIState};
+use crate::game::health::components::Health;
+use crate::game::player::components::Player;
+use crate::game::combat::components::{ StaggerEvent, CombatState,
+     Weapon, EquippedWeapon , 
+     AttackDefinition, AttackType, AttackIntent , Hurtbox };//burada neden eq. weapon var lan ,bi sorak
+use crate::game::lock_on::components::Lockable;
+use crate::game::enemy::components::StaggerState;
+
+
+use bevy::utils::HashMap;
+
+
+
+pub fn spawn_enemy(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+)  {
+    // 1. Önce ID alıyoruz
+    let enemy_entity = commands.spawn_empty().id();
+
+    let enemy_material = materials.add(Color::srgb(0.8, 0.1, 0.1));
+    let weapon_wood = materials.add(Color::srgb(0.4, 0.2, 0.1));
+    let weapon_metal = materials.add(Color::srgb(0.8, 0.8, 0.8));
+    
+
+    commands.entity(enemy_entity).insert((
+        // GÖRSEL (PbrBundle)
+        PbrBundle {
+            mesh: meshes.add(Capsule3d { radius: 0.6, half_length: 0.6 }),
+            material: enemy_material,
+            transform: Transform::from_xyz(5.0, 3.0, -5.0),
+            ..default()
+        },
+        Enemy,
+        Lockable,
+        Health::new(100.0),
+        Hurtbox { owner: enemy_entity }, // Düşmanın hasar alma kutusu
+        
+        // --- YENİ: AI ve Savaş Bileşenleri ---
+        EnemyAIState::Idle,
+        EnemyAI {
+            detection_range: 12.0,
+            attack_range: 2.0, // Mızrak menzili oyuncuya yetecek kadar uzun
+            speed: 3.0,
+            attack_cooldown: Timer::from_seconds(1.5, TimerMode::Once), // 1.5 saniyede bir vurabilir
+        },
+        CombatState::default(),
+        AttackIntent::default(),
+        Weapon {
+            attacks: {
+                let mut map = HashMap::new();
+                map.insert(AttackType::Thrust, AttackDefinition {
+                    windup_duration: 0.3, active_duration: 0.2, recovery_duration: 0.5,
+                    stamina_cost: 15.0, damage: 22.0,
+                    hitbox_radius: 0.3, hitbox_offset: Vec3::new(0.0, 0.8, -1.5), // İleri doğru, dar alan
+                });
+                map.insert(AttackType::Overhead, AttackDefinition {
+                    windup_duration: 0.5, active_duration: 0.2, recovery_duration: 0.7,
+                    stamina_cost: 22.0, damage: 40.0, // Ağır vuruş
+                    hitbox_radius: 0.4, hitbox_offset: Vec3::new(0.0, 0.5, -1.0), // Yakın mesafe ezme
+                });
+                map.insert(AttackType::LeftSwing, AttackDefinition {
+                    windup_duration: 0.4, active_duration: 0.2, recovery_duration: 0.6,
+                    stamina_cost: 20.0, damage: 20.0,
+                    hitbox_radius: 0.6, hitbox_offset: Vec3::new(0.0, 1.0, -0.8), // Geniş alan kontrolü
+                });
+                map.insert(AttackType::RightSwing, AttackDefinition {
+                    windup_duration: 0.4, active_duration: 0.2, recovery_duration: 0.6,
+                    stamina_cost: 20.0, damage: 20.0,
+                    hitbox_radius: 0.6, hitbox_offset: Vec3::new(0.0, 1.0, -0.8), // Geniş alan kontrolü
+                });
+                map
+            }
+        },
+
+        // --- Fizik Bileşenleri ---
+        RigidBody::Dynamic, 
+        Velocity::default(), // Hareketi kontrol etmek için eklendi
+        Collider::capsule_y(0.6, 0.6),
+        LockedAxes::ROTATION_LOCKED, 
+    ))
+    .with_children(|parent| {
+        // --- SİLAH (SPEAR) ---
+        // Oyuncunun mızrağının birebir aynısı düşmanın eline de bağlanıyor
+        parent.spawn((
+            SpatialBundle {
+                transform: Transform::from_xyz(0.7, 0.0, -0.6)
+                    .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_4)),
+                ..default()
+            },
+            EquippedWeapon, 
+        )).with_children(|weapon_parent| {
+            weapon_parent.spawn(PbrBundle {
+                mesh: meshes.add(Cylinder { radius: 0.05, half_height: 1.0 }),
+                material: weapon_wood,
+                ..default()
+            });
+            weapon_parent.spawn(PbrBundle {
+                mesh: meshes.add(Cone { radius: 0.1, height: 0.4 }),
+                material: weapon_metal,
+                transform: Transform::from_xyz(0.0, 1.2, 0.0),
+                ..default()
+            });
+        });
+    });
+}
+=== FILE: enemy/mod.rs ===
+pub mod components;
+pub mod plugin;
+pub mod systems;
+pub mod spawn;
 === FILE: enemy/components.rs ===
 use bevy::prelude::*;
 
@@ -168,4 +1070,178 @@ pub struct EnemyAI {
     pub speed: f32,
     pub attack_cooldown: Timer,
 }
+
+=== FILE: enemy/systems.rs ===
+use bevy::prelude::*;
+use bevy_rapier3d::prelude::*;
+use super::components::{Enemy, EnemyAI, EnemyAIState};
+use crate::game::health::components::Health;
+use crate::game::player::components::Player;
+use crate::game::combat::components::{ StaggerEvent, CombatState, Weapon, EquippedWeapon , AttackDefinition, AttackType, AttackIntent };//burada neden eq. weapon var lan ,bi sorak
+use crate::game::lock_on::components::Lockable;
+use crate::game::enemy::components::StaggerState;
+
+
+use bevy::utils::HashMap;
+
+
+// YENİ: Hasar anında tetiklenen Stagger Event'ini yakalar
+pub fn handle_stagger_events(
+    mut commands: Commands,
+    mut events: EventReader<StaggerEvent>,
+    mut query: Query<(&mut EnemyAIState, &mut CombatState)>,
+) {
+    for event in events.read() {
+        println!("Stagger Event Received for entity: {:?}", event.target); // LOG
+        if let Ok((mut ai_state, mut combat_state)) = query.get_mut(event.target) {
+            println!("Applying Stagger to Enemy!");
+            *ai_state = EnemyAIState::Stagger;
+            // 2. Saldırıyı iptal et (combat'ı boşa çıkar)
+            *combat_state = CombatState::Idle;
+            // 3. Stagger bileşenini ekle
+            commands.entity(event.target).insert(StaggerState {
+                timer: Timer::from_seconds(event.duration, TimerMode::Once),
+            });
+        }
+        else{
+            println!("Enemy AI State not found for entity!");
+        }
+    }
+}
+
+// YENİ: Stagger süresini sayan ve bitince AI'yı eski haline döndüren sistem
+pub fn process_stagger(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut query: Query<(Entity, &mut StaggerState, &mut EnemyAIState)>,
+) {
+    for (entity, mut stagger, mut ai_state) in query.iter_mut() {
+        println!("Stagger Timer: {:?}", stagger.timer.remaining());
+        stagger.timer.tick(time.delta());
+        if stagger.timer.finished() {
+            println!("Stagger süresi doldu, durumu Idle'a çekiyorum.");
+            *ai_state = EnemyAIState::Idle; // Stagger bitti
+            commands.entity(entity).remove::<StaggerState>(); // Bileşeni sil
+        }
+    }
+}
+
+
+
+
+// YENİ SİSTEM: Düşman FSM Yapay Zekası
+pub fn enemy_ai_system(
+    time: Res<Time>,
+    player_query: Query<&Transform, With<Player>>,
+    mut enemy_query: Query<(
+        Entity,
+        &mut Transform,
+        &mut Velocity,
+        &mut EnemyAI,
+        &mut EnemyAIState,
+        &mut CombatState,
+        &Weapon,
+        &Health,
+    ), (With<Enemy>, Without<Player>)>,
+) {
+    // Oyuncu hayatta değilse veya yoksa AI çalışmasın
+    let Ok(player_transform) = player_query.get_single() else { return };
+    let player_pos = player_transform.translation;
+
+    for (entity, mut transform, mut velocity, mut ai, mut ai_state, mut combat_state, weapon, health) in enemy_query.iter_mut() {
+        // Cooldown sayacı her frame akar
+        //println!("Entity: {:?} | State: {:?}", entity, *ai_state);
+        ai.attack_cooldown.tick(time.delta());
+
+        // 1. KURAL: Can sıfır veya altındaysa AI sistemlerinden tamamen çık
+        if health.current <= 0.0 {
+            *ai_state = EnemyAIState::Dead;
+            velocity.linvel.x = 0.0;
+            velocity.linvel.z = 0.0;
+            // Y'ye dokunmuyoruz ki düşebilsin // Hareketi durdur
+            continue; // Döngünün kalanını atla (Sistemden çıkış)
+        }
+
+        let enemy_pos = transform.translation;
+        let distance = enemy_pos.distance(player_pos);
+
+        // Sadece XZ düzleminde (düz zeminde) takip yönü hesaplama
+        let mut direction = player_pos - enemy_pos;
+        direction.y = 0.0;
+        let direction_flat = direction.normalize_or_zero();
+
+        match *ai_state {
+            
+            EnemyAIState::Idle => {
+                velocity.linvel.x = 0.0;
+                velocity.linvel.z = 0.0;
+                // Y'ye dokunmuyoruz ki düşebilsin
+                if distance <= ai.detection_range {
+                    *ai_state = EnemyAIState::Chase;
+                }
+            }
+            EnemyAIState::Chase => {
+                if distance > ai.detection_range {
+                    *ai_state = EnemyAIState::Idle;
+                    velocity.linvel.x = 0.0;
+                    velocity.linvel.z = 0.0;
+                    // Y'ye dokunmuyoruz ki düşebilsin
+                } else if distance <= ai.attack_range {
+                    *ai_state = EnemyAIState::Attack;
+                    velocity.linvel.x = 0.0;
+                    velocity.linvel.z = 0.0;
+                    // Y'ye dokunmuyoruz ki düşebilsin
+                } else {
+                    // Oyuncuya doğru fiziksel hız vererek ilerle
+                    velocity.linvel = direction_flat * ai.speed;
+                    
+                    // Oyuncunun olduğu yöne doğru pürüzsüzce dön
+                    let target_look = Vec3::new(player_pos.x, enemy_pos.y, player_pos.z);
+                    transform.look_at(target_look, Vec3::Y);
+                }
+            }
+            EnemyAIState::Attack => {
+                velocity.linvel.x = 0.0;
+velocity.linvel.z = 0.0;
+// Y'ye dokunmuyoruz ki düşebilsin // Saldırırken ayakları sabit dursun
+                
+                // Saldırırken de oyuncuyu yüzüyle takip etsin
+                let target_look = Vec3::new(player_pos.x, enemy_pos.y, player_pos.z);
+                transform.look_at(target_look, Vec3::Y);
+
+                // Eğer oyuncu kaçtıysa ve o sırada aktif bir vuruş evresinde değilse takibe geri dön
+                if distance > ai.attack_range && matches!(*combat_state, CombatState::Idle) {
+                    *ai_state = EnemyAIState::Chase;
+                } 
+                // Menzildeyse, cooldown bittiyse ve şu an boştaysa (Idle) saldırıyı başlat!
+                else if matches!(*combat_state, CombatState::Idle) && ai.attack_cooldown.finished() {
+                    let chosen_attack = AttackType::Thrust; 
+                    
+                    // 2. Silahın içindeki sözlükten o saldırının verisini çek
+                    if let Some(attack_def) = weapon.attacks.get(&chosen_attack) {
+                        
+                        // 3. CombatState'i güncelle
+                        *combat_state = CombatState::Windup {
+                            timer: Timer::from_seconds(attack_def.windup_duration, TimerMode::Once), 
+                            attack_type: chosen_attack
+                        };
+                    ai.attack_cooldown.reset(); // Cooldown'ı baştan kur
+                }
+            }
+            }
+            EnemyAIState::Dead => {
+                velocity.linvel.x = 0.0;
+velocity.linvel.z = 0.0;
+// Y'ye dokunmuyoruz ki düşebilsin
+            }
+            EnemyAIState::Stagger => {
+                velocity.linvel = Vec3::ZERO; // Sersemlediğinde hareket etmesin
+                return;
+            }
+            }
+        }
+    
+}
+
+
 

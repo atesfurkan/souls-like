@@ -8,6 +8,7 @@ pub mod enemy;
 pub mod health;
 pub mod combat;
 pub mod lock_on;
+pub mod weapon;
 
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*; 
@@ -27,6 +28,7 @@ impl Plugin for GamePlugin {
             enemy::plugin::EnemyPlugin,
             combat::plugin::CombatPlugin,
             lock_on::plugin::LockOnPlugin,
+            weapon::plugin::WeaponPlugin, 
             
         ));
     }

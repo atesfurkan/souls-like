@@ -3,10 +3,11 @@ use bevy_rapier3d::prelude::*;
 use super::components::{Enemy, EnemyAI, EnemyAIState};
 use crate::game::health::components::Health;
 use crate::game::player::components::Player;
-use crate::game::combat::components::{ StaggerEvent, CombatState, Weapon, EquippedWeapon , AttackDefinition, AttackType, AttackIntent };//burada neden eq. weapon var lan ,bi sorak
+use crate::game::combat::components::{ StaggerEvent, CombatState,
+      EquippedWeapon , AttackIntent }; 
 use crate::game::lock_on::components::Lockable;
 use crate::game::enemy::components::StaggerState;
-
+use crate::game::weapon::components::{Weapon, AttackDefinition, AttackType};
 
 use bevy::utils::HashMap;
 
