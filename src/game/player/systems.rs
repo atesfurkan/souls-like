@@ -1,18 +1,34 @@
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
+use bevy::utils::HashMap;
 use crate::game::common::components::MainCamera;
 use crate::game::stamina::components::Stamina;
 use crate::game::dodge::components::DodgeState;
 use crate::game::combat::components::{CombatState, 
       AttackIntent};
 use crate::game::lock_on::components::LockOnState;
-
-use crate::game::weapon::components::{Weapon, AttackDefinition, AttackType};
-
-use bevy::utils::HashMap;
-
+use crate::game::weapon::components::{Weapon, AttackDefinition,
+     AttackType };
+use crate::game::weapon::events::WeaponSwapRequestEvent;
 use super::components::{Player, PlayerState, PlayerMovementConfig}; 
 
+
+
+pub fn handle_weapon_swap_input(
+    keyboard_input: Res<ButtonInput<KeyCode>>,
+    mut swap_events: EventWriter<WeaponSwapRequestEvent>,
+    player_query: Query<(Entity, &CombatState), With<Player>>,
+) {
+    // 1 tuşuna basılıp basılmadığını kontrol et
+    if keyboard_input.just_pressed(KeyCode::Digit1) {
+        if let Ok((entity, combat_state)) = player_query.get_single() {
+            // Edge Case kontrolü: Sadece Idle durumundayken silah değiştirilebilir
+            if *combat_state == CombatState::Idle {
+                swap_events.send(WeaponSwapRequestEvent { entity });
+            }
+        }
+    }
+}
 
 pub fn player_movement(
     keys: Res<ButtonInput<KeyCode>>,

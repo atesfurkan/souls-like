@@ -54,6 +54,17 @@ Enemy sistemi
 
 ---
 
+1. Önce ilgili contract dosyalarını gönder.
+
+2. Daha sonra yalnızca değiştirilmesi beklenen modülü gönder.
+
+3. AI başka dosya isterse önce gerekçesini açıklamalıdır.
+
+4. Gerekmeyen hiçbir kaynak kod gönderilmez.
+
+5. Contract dosyaları referans kabul edilir.
+
+
 ## Kural
 
 Contract dosyaları her sprintte güncellenmez.

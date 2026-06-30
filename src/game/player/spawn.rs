@@ -8,9 +8,9 @@ use crate::game::combat::components::{CombatState,  Hurtbox,
       AttackIntent , EquippedWeapon};
 use crate::game::lock_on::components::LockOnState;
 
-use crate::game::weapon::components::{Weapon ,
+use crate::game::weapon::components::{Weapon ,  WeaponType ,
      AttackDefinition, AttackType};
-use crate::game::weapon::data:: {get_weapon_data , WeaponType } ;
+use crate::game::weapon::data:: {get_weapon_data } ;
 
 use bevy::utils::HashMap;
 

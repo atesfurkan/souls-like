@@ -1,15 +1,17 @@
 use bevy::prelude::*;
-use crate::game::weapon::systems::auto_spawn_weapon_visuals;
-
+use crate::game::weapon::systems::{auto_spawn_weapon_visuals, process_weapon_swap};
+use crate::game::weapon::events::WeaponSwapRequestEvent;
 pub struct WeaponPlugin;
 
 impl Plugin for WeaponPlugin {
     fn build(&self, app: &mut App) {
-        // Silahların görsel parçalarını otomatik oluşturan sistem
-        app.add_systems(Update, auto_spawn_weapon_visuals);
+        // Event'i register ediyoruz
+        app.add_event::<WeaponSwapRequestEvent>();
         
-        // İleride silahların dayanıklılığı, envanter yönetimi veya 
-        // başka silah mekanikleri eklemek isterseniz bu plugin 
-        // çatısı altında kolayca ekleyebilirsiniz.
+        // Silahların görsel parçalarını otomatik oluşturan ve değişimleri yöneten sistemler 
+        app.add_systems(Update, (
+            auto_spawn_weapon_visuals,
+            process_weapon_swap,
+        ));
     }
 }

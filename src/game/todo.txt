@@ -2,4 +2,12 @@ abi weapon diye klasör oluşturup weapon verilerini orada tutmak lazım
 enemy ai için de ayrı dosya lazım olabilir ama bilmiyorum
 her yazdığımız yardımcı dosya için nasıl kullanılır txt belgesi lazım
 	mesela weapon , health , stamina falan
+//bunları yaptık lan
 
+abi combatcı ai combat foundation gerek yok daha fazla diyor
+    nasıl yok olm , kalkanımız yok , zırhımız yok  ,tekme atamıyoz, veya kafa atsak,
+    kombo yok, menzilli silah temeli yok , vuruş ağırlığı yok (basılı tutunca daha uzun süre 
+    gerinip daha güçlü vurabiliriz) , ben bunları yapmadan düşmana ai tasarlamaya mı girişcem,
+    
+    öbürü de aynı şeyleri diyor ya, 
+    ai'lara fikrini sormıcan abi , zorla yaptırcan

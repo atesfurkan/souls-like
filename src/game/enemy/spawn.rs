@@ -9,9 +9,9 @@ use crate::game::combat::components::{ StaggerEvent, CombatState,
 use crate::game::lock_on::components::Lockable;
 use crate::game::enemy::components::StaggerState;
 
-use crate::game::weapon::components::{Weapon ,
+use crate::game::weapon::components::{Weapon , WeaponType ,
      AttackDefinition, AttackType};
-use crate::game::weapon::data:: {get_weapon_data , WeaponType } ;
+use crate::game::weapon::data:: {get_weapon_data } ;
 use bevy::utils::HashMap;
 
 
@@ -47,7 +47,7 @@ pub fn spawn_enemy(
         EnemyAI {
             detection_range: 12.0,
             attack_range: 2.0, // Mızrak menzili oyuncuya yetecek kadar uzun
-            speed: 3.0,
+            speed: 1.0,
             attack_cooldown: Timer::from_seconds(1.5, TimerMode::Once), // 1.5 saniyede bir vurabilir
         },
         CombatState::default(),

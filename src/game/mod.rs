@@ -9,6 +9,8 @@ pub mod health;
 pub mod combat;
 pub mod lock_on;
 pub mod weapon;
+pub mod debug_hud;
+
 
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*; 
@@ -29,7 +31,7 @@ impl Plugin for GamePlugin {
             combat::plugin::CombatPlugin,
             lock_on::plugin::LockOnPlugin,
             weapon::plugin::WeaponPlugin, 
-            
+            debug_hud::plugin::DebugHudPlugin,
         ));
     }
 }

@@ -1,14 +1,17 @@
+
+---
+
 ### Purpose
 
-Tüm silahların istatistiksel verilerini (hasar, hız, hitbox) ve görsel tanımlarını (mesh, materyal) tek bir merkezden sağlayan, veri güdümlü (data-driven) bir silah konfigürasyon ve otomatik görsel üretim (spawning) modülüdür.
+Tüm silahların kimlik, istatistik (hasar, hız, hitbox) ve görsel (mesh, materyal) tanımlarını sağlayan, hiyerarşi kuralları sıkı belirlenmiş veri güdümlü (data-driven) konfigürasyon ve yaşam döngüsü modülü.
 
 ### Public API
 
 **Public Components**
 
-* `Weapon`: Silahın tüm saldırı tanımlarını (`attacks`) ve görsel blueprint verisini (`visuals`) tutan ana bileşen.
+* `Weapon`: Ana veri bileşeni. UI/HUD sistemleri için kimlik bilgisini (`weapon_type: WeaponType`, `name: String`), savaş sistemleri için saldırı tanımlarını (`attacks`) ve görsel sistemler için parça verisini (`visuals`) içerir.
 * `WeaponVisuals`: Silahı oluşturan parçaların hiyerarşik listesini tutar.
-* `WeaponPart`: Silahın görsel anatomisini tanımlayan enum (`Cylinder`, `Cone` vb.).
+* `WeaponPart`: Silahın anatomisini tanımlayan enum (`Cylinder`, `Cone` vb.).
 
 **Public Events**
 
@@ -20,45 +23,43 @@ Tüm silahların istatistiksel verilerini (hasar, hız, hitbox) ve görsel tanı
 
 **Public Functions / Data**
 
-* `WeaponType`: Sistemde kayıtlı olan tüm silahların listesini tutan enum (`Spear`, `GreatSword` vb.).
+* `WeaponType`: Sistemde kayıtlı olan silahların enum listesi (`Spear`, `GreatSword` vb.).
 * `get_weapon_data(weapon_type: WeaponType) -> Weapon`: İstenilen silahın statik verilerini ve görsel haritasını üreten factory fonksiyonu.
 
 **Public Systems**
 
-* `auto_spawn_weapon_visuals`: Üzerinde `Weapon` bileşeni olan entity'leri dinleyip görsel parçalarını otomatik oluşturan sistem.
+* `auto_spawn_weapon_visuals`: Root entity'deki `Weapon` bileşenini dinleyip, görselleri `EquippedWeapon` child entity'sine otomatik çizen sistem.
 
 **Public Plugin**
 
-* `WeaponPlugin`: Modülün otomatik görsel oluşturma ve gelecekteki silah yaşam döngüsü sistemlerini Bevy app'ine kaydeder.
+* `WeaponPlugin`: Otomatik görsel oluşturma ve silah entegrasyon sistemlerini app'e kaydeder.
 
 ### Integration
 
-* Ana app başlatılırken `WeaponPlugin` register edilir.
-* Silah takılacak bir karakter (Player/Enemy) spawn edilirken, karakterin kök dizinine (root) veya bir silah tutucu (holder) child entity'sine `get_weapon_data()` çağrılarak üretilen `Weapon` component attach edilir.
-* Görsel sistemin doğru child entity üzerine silahı çizebilmesi için, hedeflenen tutucu entity'ye `EquippedWeapon` (Combat modülünden) marker component'i attach edilmelidir.
+* **Ana Kurulum:** Ana app başlatılırken `WeaponPlugin` register edilir.
+* **Root Entity (Karakter):** Combat ve stat hesaplamaları için `Weapon` bileşeni doğrudan karakterin en üst entity'sine (Player/Enemy) eklenir.
+* **Child Entity (Silah Tutucu):** Silahın fiziksel olarak konumlanacağı ve görsellerin ekleneceği child (alt) entity'ye `EquippedWeapon` (Combat modülünden) marker'ı eklenir.
 
 ### API Usage Examples
 
-* Register `WeaponPlugin` → Görsel (Visual) auto-spawning sistemi aktif olur.
-* Call `get_weapon_data(WeaponType::Spear)` → `Weapon` verisi elde edilir.
-* Attach `Weapon` to entity → Plugin, `visuals` verisini okur ve mesh child entity'leri otomatik spawn eder.
-* Combat System reads `Weapon.attacks` → Aktif saldırıya ait hitbox yarıçapı, hasarı ve offset verisi elde edilir.
+* **Silah Donanma (Equip):** Root entity'ye `Weapon` ekle → Plugin, Root'un çocuklarında `EquippedWeapon` arar → Görselleri bu child altına spawn eder.
+* **HUD Okuma:** UI sistemi Root entity üzerindeki `Weapon` bileşenine query atar → `weapon.name` veya `weapon.weapon_type` alanını salt okunur (read-only) çeker.
+* **Silah Bırakma (Unequip):** Root entity'den `Weapon` bileşeni `remove` edilir → `EquippedWeapon` entity'sinin altındaki tüm görsel child'lar (mesh'ler) `despawn_descendants` ile temizlenir.
 
 ### Dependencies
 
-* `bevy::prelude` (Transform, Mesh, Color, SpatialBundle vb. temel render/fizik araçları).
-* `combat` modülü (`EquippedWeapon` marker bileşeni, görselin nereye spawn edileceğini belirlemek için kullanılır).
+* `bevy::prelude`
+* `combat` modülü (`EquippedWeapon` marker bileşeni bağımlılığı).
 
 ### Rules
 
-* `Weapon` struct'ı ve içerisindeki `HashMap` doğrudan manuel olarak oluşturulmaz; her zaman `get_weapon_data` factory fonksiyonu kullanılmalıdır.
-* Silahların 3D/Mesh görselleri `spawn.rs` veya başka modüller içerisinde manuel olarak spawn edilmez; `Weapon` bileşeni eklenerek modülün otomatik spawn etmesi beklenir.
-* Combat modülü `Weapon` içerisindeki veriyi (hasar, süre, hitbox radius) yalnızca okumalı (read-only), bu değerler üzerinden mutasyon yapmamalıdır.
-* Görsel spawn sisteminin bir döngüye girmemesi için modülün kendi içinde kullandığı `WeaponChildrenCreated` marker'ı dışarıdan manuel olarak silinmemeli veya eklenmemelidir.
+* **Hiyerarşi Zorunluluğu:** `Weapon` bileşeni *kesinlikle* root (ana) entity üzerinde olmalıdır. `EquippedWeapon` marker'ı *kesinlikle* root'un bir alt (child) entity'sinde olmalıdır. Her iki bileşen aynı entity üzerinde bulunamaz.
+* **Salt Okunur UI:** UI/HUD sistemleri `Weapon` bileşenindeki kimlik (`name`, `weapon_type`) alanlarını yalnızca okuyabilir, değiştiremez.
+* **Temizleme (Cleanup) Kuralı:** Yeni bir silah takıldığında veya mevcut silah çıkarıldığında, eski görsel asset'lerin hafızada kalmaması için `EquippedWeapon` entity'sinin çocukları (eski mesh/materyaller) kesinlikle despawn edilmelidir. Otomatik spawn sistemi eski görselleri silmez.
+* **Sanal Üretim:** `Weapon` struct'ı manuel oluşturulamaz; her zaman `get_weapon_data` kullanılmalıdır.
 
 ### Extension Points
 
-* `WeaponPart` enum'ı genişletilerek `GltfModel { path: String }` ile 3D asset desteği eklenebilir.
-* `Weapon` bileşenine `durability` (dayanıklılık) veya `weight` (ağırlık) statları eklenebilir.
-* Silah geliştirmeleri (Upgrade) için taban statları modifiye eden bir ara katman/sistem yazılabilir.
-* Farklı hasar tipleri (Elemental, Slash, Pierce) `AttackDefinition` içerisine eklenebilir.
+* Silah değiştirme işlemini otomatikleştirecek ve eski görselleri temizleyecek bir `WeaponChangedEvent` ve cleanup sistemi modüle eklenebilir.
+* `WeaponPart` enum'ı `GltfModel` ile 3D asset desteği sağlayacak şekilde genişletilebilir.
+* `Weapon` bileşenine dayanıklılık (durability) verisi eklenebilir.

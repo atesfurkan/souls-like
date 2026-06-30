@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use super::systems::player_movement;
+use super::systems::{player_movement , handle_weapon_swap_input};
 //use super::spawn::spawn_player;
 use super::components::{Player, PlayerState, PlayerMovementConfig};
 use crate::game::player::spawn::spawn_player;
@@ -11,6 +11,6 @@ impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PlayerMovementConfig>() // Config sisteme kaydedildi
            .add_systems(Startup, spawn_player)
-           .add_systems(Update, player_movement);
+           .add_systems(Update, (player_movement, handle_weapon_swap_input));
     }
 }

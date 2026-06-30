@@ -1,6 +1,43 @@
 use bevy::prelude::*;
-use crate::game::weapon::components::{Weapon, WeaponPart, WeaponChildrenCreated};
 use crate::game::combat::components::EquippedWeapon;
+
+
+use crate::game::weapon::components::{Weapon, WeaponPart,
+     WeaponChildrenCreated , WeaponType};
+use crate::game::weapon::events::WeaponSwapRequestEvent;
+use crate::game::weapon::data::get_weapon_data;
+
+pub fn process_weapon_swap(
+    mut events: EventReader<WeaponSwapRequestEvent>,
+    mut commands: Commands,
+    mut root_query: Query<&mut Weapon>,
+    equipped_query: Query<(Entity, &Parent), With<EquippedWeapon>>,
+) {
+    for event in events.read() {
+        if let Ok(mut weapon) = root_query.get_mut(event.entity) {
+            // İki silah arasında geçiş yap
+            let next_weapon_type = match weapon.weapon_type {
+                WeaponType::Spear => WeaponType::VampireBlade,
+                _ => WeaponType::Spear,
+            };
+
+            // 1. İstatistikleri ve görsel tanımları Root Entity'de güncelle
+            *weapon = get_weapon_data(next_weapon_type);
+
+            // 2. Eski görselleri temizle
+            for (equipped_entity, parent) in equipped_query.iter() {
+                // Eğer silah tutucu, eventi fırlatan entity'nin çocuğuysa
+                if parent.get() == event.entity {
+                    // Sadece silahın kendisini değil, altındaki tüm meshleri sil (Despawn Descendants)
+                    commands.entity(equipped_entity).despawn_descendants();
+                }
+            }
+
+            // 3. auto_spawn_weapon_visuals sistemini yeniden tetiklemek için marker'ı sil
+            commands.entity(event.entity).remove::<WeaponChildrenCreated>();
+        }
+    }
+}
 
 
 pub fn auto_spawn_weapon_visuals(

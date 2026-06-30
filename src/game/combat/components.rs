@@ -32,7 +32,7 @@ impl Default for AttackIntent {
 
 //attackdef vardı 
 //weapon vardı
-#[derive(Component, Default)]
+#[derive(Component, Default , PartialEq , Eq)]
 pub enum CombatState {
     #[default]
     Idle,
@@ -47,6 +47,7 @@ pub struct Hitbox {
     pub damage: f32,
     pub owner: Entity,
     pub hit_entities: HashSet<Entity>,
+    pub lifesteal: f32,
 }
 
 #[derive(Component)]

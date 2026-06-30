@@ -11,6 +11,12 @@ pub enum AttackType {
 }
 
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WeaponType {
+    Spear,
+    VampireBlade,
+}
+
 // Tek bir saldırının tüm özellikleri
 #[derive(Clone)]
 pub struct AttackDefinition {
@@ -21,15 +27,16 @@ pub struct AttackDefinition {
     pub damage: f32,
     pub hitbox_radius: f32,
     pub hitbox_offset: Vec3,
+    pub lifesteal: f32, // YENİ: Vuruş başına kazanılacak can miktarı
 }
 
-// Silah artık bir saldırı sözlüğü tutuyor
 #[derive(Component)]
 pub struct Weapon {
+    pub name: String,              // YENİ: HUD için silahın görünen adı
+    pub weapon_type: WeaponType,   // YENİ: Mantıksal kontroller için silah tipi
     pub attacks: HashMap<AttackType, AttackDefinition>,
     pub visuals: WeaponVisuals,
 }
-
 
 pub enum WeaponPart {
     Cylinder { radius: f32, height: f32, color: Color },
@@ -42,6 +49,5 @@ pub struct WeaponVisuals {
     pub parts: Vec<(WeaponPart, Transform)>, // Hangi parça nerede duracak?
 }
 
-// YENİ: Sadece işaretçi (Marker)
 #[derive(Component)]
 pub struct WeaponChildrenCreated;

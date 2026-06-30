@@ -1,27 +1,22 @@
-use super::components::{StaggerEvent 
-    ,AttackIntent,  CombatState, 
-    EquippedWeapon, Hitbox, Hurtbox};
-use crate::game::health::events::DamageEvent; // Event'imizi import ediyoruz
+use super::components::{AttackIntent, CombatState, EquippedWeapon, Hitbox, Hurtbox, StaggerEvent};
+use crate::game::enemy::components::StaggerState;
+use crate::game::health::components::Health;
+use crate::game::health::events::{DamageEvent, HealEvent};
 use crate::game::lock_on::components::LockOnState;
 use crate::game::player::components::Player;
 use crate::game::stamina::components::Stamina;
-use crate::game::enemy::components::StaggerState;
-use crate::game::health::components::Health;
 
-use crate::game::weapon::components::{Weapon , AttackType}; 
+use crate::game::weapon::components::{AttackType, Weapon};
 
 use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
 use bevy::utils::HashSet;
 use bevy_rapier3d::prelude::*;
 
-
 // 1. GERÇEK OYUNCU GİRDİSİ (Senin AttackIntent yapınla)
 pub fn player_attack_input(
     mouse_input: Res<ButtonInput<MouseButton>>,
-    mut query: Query<(&mut CombatState, &Weapon, &AttackIntent),
-    With<Player>>,
-    
+    mut query: Query<(&mut CombatState, &Weapon, &AttackIntent), With<Player>>,
 ) {
     if mouse_input.just_pressed(MouseButton::Left) {
         for (mut state, weapon, intent) in query.iter_mut() {
@@ -42,15 +37,15 @@ pub fn player_attack_input(
 }
 
 // 2. SAVAŞ DURUM MAKİNESİ (Senin orijinal silah sürelerini kullanır)
-pub fn combat_state_machine(
-    time: Res<Time>,
-    mut query: Query<(&mut CombatState, &Weapon)>,
-) {
+pub fn combat_state_machine(time: Res<Time>, mut query: Query<(&mut CombatState, &Weapon)>) {
     for (mut state, weapon) in query.iter_mut() {
         let mut next_state = None;
 
         match *state {
-            CombatState::Windup { ref mut timer, attack_type } => {
+            CombatState::Windup {
+                ref mut timer,
+                attack_type,
+            } => {
                 timer.tick(time.delta());
                 if timer.just_finished() {
                     let def = weapon.attacks.get(&attack_type).unwrap();
@@ -61,7 +56,11 @@ pub fn combat_state_machine(
                     });
                 }
             }
-            CombatState::Active { ref mut timer, attack_type, .. } => {
+            CombatState::Active {
+                ref mut timer,
+                attack_type,
+                ..
+            } => {
                 timer.tick(time.delta());
                 if timer.just_finished() {
                     let def = weapon.attacks.get(&attack_type).unwrap();
@@ -86,8 +85,6 @@ pub fn combat_state_machine(
     }
 }
 
-
-
 pub fn cleanup_hitboxes(
     mut commands: Commands,
     hitbox_query: Query<(Entity, &Hitbox)>,
@@ -96,12 +93,10 @@ pub fn cleanup_hitboxes(
     for (hitbox_entity, hitbox) in hitbox_query.iter() {
         // Hitbox'ın sahibinin (Player/Enemy) mevcut durumunu al
         if let Ok(combat_state) = owner_query.get(hitbox.owner) {
-            
             // Eğer sahibi artık 'Active' durumunda DEĞİLSE, saldırı bitmiş demektir. Hitbox'ı sil!
             if !matches!(combat_state, CombatState::Active { .. }) {
                 commands.entity(hitbox_entity).despawn();
             }
-            
         } else {
             // Eğer hitbox'ın sahibi (owner) oyundan tamamen despawn olduysa yetim kalan hitbox'ı sil
             commands.entity(hitbox_entity).despawn();
@@ -118,34 +113,41 @@ pub fn hit_registration_system(
     for collision_event in collision_events.read() {
         // Sadece kesişme başladığında çalışsın (Started)
         if let CollisionEvent::Started(entity1, entity2, _) = collision_event {
-            
             // Hangi Entity Hitbox, hangisi Hurtbox? Bunu belirle.
-            let (hitbox_entity, hurtbox_entity) = if hitbox_query.contains(*entity1) && hurtbox_query.contains(*entity2) {
-                (*entity1, *entity2)
-            } else if hitbox_query.contains(*entity2) && hurtbox_query.contains(*entity1) {
-                (*entity2, *entity1)
-            } else {
-                continue; // İkisi de Hitbox/Hurtbox eşleşmesi değilse pas geç
-            };
+            let (hitbox_entity, hurtbox_entity) =
+                if hitbox_query.contains(*entity1) && hurtbox_query.contains(*entity2) {
+                    (*entity1, *entity2)
+                } else if hitbox_query.contains(*entity2) && hurtbox_query.contains(*entity1) {
+                    (*entity2, *entity1)
+                } else {
+                    continue; // İkisi de Hitbox/Hurtbox eşleşmesi değilse pas geç
+                };
 
             // Bileşenleri güvenli bir şekilde al
-            let Ok(mut hitbox) = hitbox_query.get_mut(hitbox_entity) else { continue };
-            let Ok(hurtbox) = hurtbox_query.get(hurtbox_entity) else { continue };
+            let Ok(mut hitbox) = hitbox_query.get_mut(hitbox_entity) else {
+                continue;
+            };
+            let Ok(hurtbox) = hurtbox_query.get(hurtbox_entity) else {
+                continue;
+            };
 
             // 1. Kendi kendine vurmayı engelle (Player kendi kılıcıyla vurulmasın)
-            if hitbox.owner == hurtbox.owner { continue; }
+            if hitbox.owner == hurtbox.owner {
+                continue;
+            }
 
             // 2. Double Hit (Tek saldırıda çoklu hasar) engelleme
             // Eğer bu Hurtbox'ın sahibi zaten vurulanlar listesindeyse, işlemi iptal et
-            if hitbox.hit_entities.contains(&hurtbox.owner) { continue; }
+            if hitbox.hit_entities.contains(&hurtbox.owner) {
+                continue;
+            }
 
             // 3. Health Pipeline Entegrasyonu
             // Hasarı kime uygulayacağız? Hurtbox'ın owner'ına (Player veya Enemy) [cite: 1]
             if let Ok(mut health) = health_query.get_mut(hurtbox.owner) {
-                
                 // Hasarı uygula [cite: 4]
                 health.current -= hitbox.damage;
-                
+
                 println!(
                     "HIT REGISTERED! Entity {:?} dealt {} damage to Entity {:?}. Target Health: {}/{}",
                     hitbox.owner, hitbox.damage, hurtbox.owner, health.current, health.max
@@ -153,40 +155,48 @@ pub fn hit_registration_system(
 
                 // 4. Hitbox'a bu hedefi vurduğunu kaydet ki bir sonraki frame tekrar vurmasın [cite: 3]
                 hitbox.hit_entities.insert(hurtbox.owner);
-                
+
                 // Not: Eğer istersen burada Commands ile StaggerEvent de fırlatabilirsin. [cite: 1]
             }
         }
     }
 }
 
-
 // Bu sistem, CombatState Active'e geçtiğinde fiziksel Hitbox'ı üretir.
-// Kendi mevcut state makinenin (FSM) içine de 
+// Kendi mevcut state makinenin (FSM) içine de
 // bu "commands.spawn" kısmını yedirebilirsin.
 pub fn spawn_hitbox_on_attack(
     mut commands: Commands,
     mut query: Query<(Entity, &mut CombatState, &Transform, &Weapon)>, // Weapon eklendi
 ) {
     for (attacker_entity, mut combat_state, transform, weapon) in query.iter_mut() {
-        if let CombatState::Active { ref mut hitbox_entity, attack_type, .. } = *combat_state {
+        if let CombatState::Active {
+            ref mut hitbox_entity,
+            attack_type,
+            ..
+        } = *combat_state
+        {
             if hitbox_entity.is_none() {
                 // Silah verisini çekiyoruz
                 if let Some(def) = weapon.attacks.get(&attack_type) {
-                    let new_hitbox = commands.spawn((
-                        Hitbox {
-                            damage: def.damage,
-                            owner: attacker_entity,
-                            hit_entities: HashSet::new(),
-                        },
-                        bevy_rapier3d::prelude::Collider::ball(def.hitbox_radius), 
-                        bevy_rapier3d::prelude::Sensor, 
-                        bevy_rapier3d::prelude::ActiveEvents::COLLISION_EVENTS, 
-                        bevy_rapier3d::prelude::ActiveCollisionTypes::default() | bevy_rapier3d::prelude::ActiveCollisionTypes::KINEMATIC_STATIC,
-                        TransformBundle::from_transform(
-                            Transform::from_translation(transform.translation + transform.rotation * def.hitbox_offset)
-                        ),
-                    )).id();
+                    let new_hitbox = commands
+                        .spawn((
+                            Hitbox {
+                                damage: def.damage,
+                                owner: attacker_entity,
+                                hit_entities: HashSet::new(),
+                                lifesteal: def.lifesteal,
+                            },
+                            bevy_rapier3d::prelude::Collider::ball(def.hitbox_radius),
+                            bevy_rapier3d::prelude::Sensor,
+                            bevy_rapier3d::prelude::ActiveEvents::COLLISION_EVENTS,
+                            bevy_rapier3d::prelude::ActiveCollisionTypes::default()
+                                | bevy_rapier3d::prelude::ActiveCollisionTypes::KINEMATIC_STATIC,
+                            TransformBundle::from_transform(Transform::from_translation(
+                                transform.translation + transform.rotation * def.hitbox_offset,
+                            )),
+                        ))
+                        .id();
 
                     *hitbox_entity = Some(new_hitbox);
                     println!("HITBOX YARATILDI! Hasar: {}", def.damage);
@@ -195,7 +205,6 @@ pub fn spawn_hitbox_on_attack(
         }
     }
 }
-
 
 // Farenin hareket yönüne göre saldırı niyetini belirler
 pub fn update_attack_intent(
@@ -291,6 +300,7 @@ pub fn process_attack_states(
                                 damage: attack_def.damage,
                                 owner: entity,
                                 hit_entities: HashSet::new(),
+                                lifesteal: attack_def.lifesteal,
                             },
                             Collider::ball(attack_def.hitbox_radius),
                             Sensor,
@@ -346,17 +356,34 @@ pub fn process_attack_states(
 // Güncellenmiş hit_detection sistemi
 pub fn hit_detection(
     mut collision_events: EventReader<CollisionEvent>,
-    mut hitboxes: Query<&mut Hitbox>, // mut yapıldı 
-    hurtboxes: Query<&Hurtbox>,      // Yeni: Hurtbox'ları sorguluyoruz [cite: 3]
+    mut hitboxes: Query<&mut Hitbox>, // mut yapıldı
+    hurtboxes: Query<&Hurtbox>,       // Yeni: Hurtbox'ları sorguluyoruz [cite: 3]
     mut damage_events: EventWriter<DamageEvent>,
     mut stagger_events: EventWriter<StaggerEvent>,
+    mut heal_events: EventWriter<HealEvent>,
 ) {
     for event in collision_events.read() {
         if let CollisionEvent::Started(e1, e2, _) = event {
             // İki taraflı kontrol: (e1=Hitbox, e2=Hurtbox)
-            check_and_apply_hit(*e1, *e2, &mut hitboxes, &hurtboxes, &mut damage_events, &mut stagger_events);
+            check_and_apply_hit(
+                *e1,
+                *e2,
+                &mut hitboxes,
+                &hurtboxes,
+                &mut damage_events,
+                &mut stagger_events,
+                &mut heal_events,
+            );
             // Veya (e2=Hitbox, e1=Hurtbox)
-            check_and_apply_hit(*e2, *e1, &mut hitboxes, &hurtboxes, &mut damage_events, &mut stagger_events);
+            check_and_apply_hit(
+                *e2,
+                *e1,
+                &mut hitboxes,
+                &hurtboxes,
+                &mut damage_events,
+                &mut stagger_events,
+                &mut heal_events,
+            );
         }
     }
 }
@@ -369,14 +396,16 @@ fn check_and_apply_hit(
     hurtboxes: &Query<&Hurtbox>, // Hurtbox parametresi eklendi
     damage_events: &mut EventWriter<DamageEvent>,
     stagger_events: &mut EventWriter<StaggerEvent>,
+    heal_events: &mut EventWriter<HealEvent>,
 ) {
     // 1. Saldırgan bir hitbox mı?
     if let Ok(mut hitbox) = hitboxes.get_mut(attacker_entity) {
         // 2. Kurban bir hurtbox mı?
         if let Ok(hurtbox) = hurtboxes.get(victim_entity) {
-            
             // Kendi kendine vurma kontrolü (Hurtbox'ın sahibi saldırgan mı?)
-            if hitbox.owner == hurtbox.owner { return; }
+            if hitbox.owner == hurtbox.owner {
+                return;
+            }
 
             // 3. Bu saldırıda bu hedefe (owner) daha önce vurmadıysan vur
             if !hitbox.hit_entities.contains(&hurtbox.owner) {
@@ -384,15 +413,23 @@ fn check_and_apply_hit(
 
                 // Hasarı hurtbox'un sahibine (Health'in olduğu entity) yönlendir
                 damage_events.send(DamageEvent {
-                    target: hurtbox.owner, 
+                    target: hurtbox.owner,
                     amount: hitbox.damage,
                 });
-                
+
                 stagger_events.send(StaggerEvent {
                     target: hurtbox.owner,
-                    force: 1.0, 
+                    force: 1.0,
                     duration: 0.25,
                 });
+                if hitbox.lifesteal > 0.0 {
+                    heal_events.send(HealEvent {
+                        target: hitbox.owner, // Hitbox'ın sahibi (saldıran kişi) iyileşecek
+                        amount: hitbox.lifesteal,
+                    });
+                    println!("LIFESTEAL TETİKLENDİ: {} can kazanıldı!", hitbox.lifesteal);
+                    // Test için konsola yazdır
+                }
             }
         }
     }
