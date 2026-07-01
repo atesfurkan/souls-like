@@ -11,3 +11,19 @@ abi combatcı ai combat foundation gerek yok daha fazla diyor
     
     öbürü de aynı şeyleri diyor ya, 
     ai'lara fikrini sormıcan abi , zorla yaptırcan
+    
+hit_registration_system siliyoz lan gereksizmiş
+Idle: Kalkan inik, savunma yapılmıyor.
+
+Parrying: Oyuncu sağ tıka yeni bastı. Bu durum, içinde bir zamanlayıcı (Timer) barındırır. Kılıç bu durumdayken kalkana çarparsa sekme gerçekleşir.
+
+Blocking: Parry süresi doldu ama oyuncu hala sağ tıka basılı tutuyor. Bu durumda gelen saldırılar sekmez, sadece hasar/stamina düşürülür.
+
+GuardBroken: Stamina sıfırlandığında girilen savunmasız durum.
+//harika bir şey abi
+
+combat/systems.rs dosyasındaki hit_detection sistemini güncelleyerek kılıcın (Hitbox) bir kalkanla (ShieldBox) çarpışmasını önceliklendireceğiz.
+
+combat dosyasını biraz parçaladık güzel oldu
+ olm bundan sonra hiç dosya göndermicem sadece klasör ağaç yapısnı göndercem
+    ai ordan kendi seçicek

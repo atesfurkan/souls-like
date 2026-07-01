@@ -10,6 +10,7 @@ pub mod combat;
 pub mod lock_on;
 pub mod weapon;
 pub mod debug_hud;
+pub mod shield;
 
 
 use bevy::prelude::*;
@@ -32,6 +33,7 @@ impl Plugin for GamePlugin {
             lock_on::plugin::LockOnPlugin,
             weapon::plugin::WeaponPlugin, 
             debug_hud::plugin::DebugHudPlugin,
+            shield::plugin::ShieldPlugin,
         ));
     }
 }

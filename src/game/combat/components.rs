@@ -40,6 +40,7 @@ pub enum CombatState {
     Windup { timer: Timer, attack_type: AttackType },
     Active { timer: Timer, hitbox_entity: Option<Entity>, attack_type: AttackType },
     Recovery { timer: Timer, attack_type: AttackType },
+    Recoiled { timer: Timer },
 }
 
 #[derive(Component)]

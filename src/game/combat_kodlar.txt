@@ -1,32 +1,33 @@
 === FILE: combat/plugin.rs ===
-use bevy::prelude::*;
-use super::systems::{  handle_attacks, process_attack_states, 
-    hit_detection, animate_weapon, update_attack_intent, 
-    spawn_hitbox_on_attack, hit_registration_system, cleanup_hitboxes , 
-    };
 use super::components::StaggerEvent;
-use crate::game::enemy::systems::{handle_stagger_events,process_stagger}  ;
+use super::systems::{
+    animate_weapon, cleanup_hitboxes, handle_attacks, hit_detection, process_attack_states,
+    spawn_hitbox_on_attack, update_attack_intent,handle_recoil_events,
+};
+use crate::game::enemy::systems::{handle_stagger_events, process_stagger};
+use bevy::prelude::*;
 
 pub struct CombatPlugin;
-
-
 
 impl Plugin for CombatPlugin {
     fn build(&self, app: &mut App) {
         app.add_event::<StaggerEvent>();
-        app.add_systems(Update, (
-            update_attack_intent, // YENİ: Fareden niyet okuma ilk sırada çalışmalı
-            handle_attacks, 
-            process_attack_states,
-            hit_detection,
-            animate_weapon,
-            handle_stagger_events, 
-            process_stagger,
-            spawn_hitbox_on_attack,
-            hit_registration_system,
-            cleanup_hitboxes,
-            
-        ).chain());
+        app.add_systems(
+            Update,
+            (
+                update_attack_intent, // YENİ: Fareden niyet okuma ilk sırada çalışmalı
+                handle_attacks,
+                process_attack_states,
+                hit_detection,
+                handle_recoil_events, // YENİ: Hit detection'dan hemen sonra 
+                animate_weapon,
+                handle_stagger_events,
+                process_stagger,
+                spawn_hitbox_on_attack,
+                cleanup_hitboxes,
+            )
+                .chain(),
+        );
     }
 }
 
@@ -78,6 +79,7 @@ pub enum CombatState {
     Windup { timer: Timer, attack_type: AttackType },
     Active { timer: Timer, hitbox_entity: Option<Entity>, attack_type: AttackType },
     Recovery { timer: Timer, attack_type: AttackType },
+    Recoiled { timer: Timer },
 }
 
 #[derive(Component)]
@@ -102,10 +104,30 @@ use crate::game::stamina::components::Stamina;
 
 use crate::game::weapon::components::{AttackType, Weapon};
 
+use crate::game::shield::components::{BlockingState, Shield, ShieldBox};
+use crate::game::shield::events::{BlockEvent, RecoilEvent};
+
 use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
 use bevy::utils::HashSet;
 use bevy_rapier3d::prelude::*;
+
+pub fn handle_recoil_events(
+    mut recoil_events: EventReader<RecoilEvent>,
+    mut query: Query<&mut CombatState>,
+) {
+    for event in recoil_events.read() {
+        if let Ok(mut state) = query.get_mut(event.target) {
+            // Saldırganı aniden Recoiled durumuna sok (0.5 saniyelik bir sersemleme/sekme süresi)
+            *state = CombatState::Recoiled {
+                timer: Timer::from_seconds(0.5, TimerMode::Once),
+            };
+            println!("RECOIL TETİKLENDİ: Entity {:?} sekti!", event.target);
+        }
+    }
+}
+
+
 
 // 1. GERÇEK OYUNCU GİRDİSİ (Senin AttackIntent yapınla)
 pub fn player_attack_input(
@@ -170,7 +192,16 @@ pub fn combat_state_machine(time: Res<Time>, mut query: Query<(&mut CombatState,
                     next_state = Some(CombatState::Idle);
                 }
             }
-            CombatState::Idle => {}
+            CombatState::Idle => {
+
+            }
+            CombatState::Recoiled { ref mut timer } => {
+                timer.tick(time.delta());
+                // Sekme süresi dolduğunda karakteri Idle (bekleme) durumuna geri döndür
+                if timer.just_finished() {
+                    next_state = Some(CombatState::Idle);
+                }
+            }
         }
 
         if let Some(new_state) = next_state {
@@ -198,63 +229,6 @@ pub fn cleanup_hitboxes(
     }
 }
 
-pub fn hit_registration_system(
-    mut collision_events: EventReader<CollisionEvent>,
-    mut hitbox_query: Query<&mut Hitbox>,
-    hurtbox_query: Query<&Hurtbox>,
-    mut health_query: Query<&mut Health>,
-) {
-    for collision_event in collision_events.read() {
-        // Sadece kesişme başladığında çalışsın (Started)
-        if let CollisionEvent::Started(entity1, entity2, _) = collision_event {
-            // Hangi Entity Hitbox, hangisi Hurtbox? Bunu belirle.
-            let (hitbox_entity, hurtbox_entity) =
-                if hitbox_query.contains(*entity1) && hurtbox_query.contains(*entity2) {
-                    (*entity1, *entity2)
-                } else if hitbox_query.contains(*entity2) && hurtbox_query.contains(*entity1) {
-                    (*entity2, *entity1)
-                } else {
-                    continue; // İkisi de Hitbox/Hurtbox eşleşmesi değilse pas geç
-                };
-
-            // Bileşenleri güvenli bir şekilde al
-            let Ok(mut hitbox) = hitbox_query.get_mut(hitbox_entity) else {
-                continue;
-            };
-            let Ok(hurtbox) = hurtbox_query.get(hurtbox_entity) else {
-                continue;
-            };
-
-            // 1. Kendi kendine vurmayı engelle (Player kendi kılıcıyla vurulmasın)
-            if hitbox.owner == hurtbox.owner {
-                continue;
-            }
-
-            // 2. Double Hit (Tek saldırıda çoklu hasar) engelleme
-            // Eğer bu Hurtbox'ın sahibi zaten vurulanlar listesindeyse, işlemi iptal et
-            if hitbox.hit_entities.contains(&hurtbox.owner) {
-                continue;
-            }
-
-            // 3. Health Pipeline Entegrasyonu
-            // Hasarı kime uygulayacağız? Hurtbox'ın owner'ına (Player veya Enemy) [cite: 1]
-            if let Ok(mut health) = health_query.get_mut(hurtbox.owner) {
-                // Hasarı uygula [cite: 4]
-                health.current -= hitbox.damage;
-
-                println!(
-                    "HIT REGISTERED! Entity {:?} dealt {} damage to Entity {:?}. Target Health: {}/{}",
-                    hitbox.owner, hitbox.damage, hurtbox.owner, health.current, health.max
-                );
-
-                // 4. Hitbox'a bu hedefi vurduğunu kaydet ki bir sonraki frame tekrar vurmasın [cite: 3]
-                hitbox.hit_entities.insert(hurtbox.owner);
-
-                // Not: Eğer istersen burada Commands ile StaggerEvent de fırlatabilirsin. [cite: 1]
-            }
-        }
-    }
-}
 
 // Bu sistem, CombatState Active'e geçtiğinde fiziksel Hitbox'ı üretir.
 // Kendi mevcut state makinenin (FSM) içine de
@@ -439,6 +413,12 @@ pub fn process_attack_states(
                     next_state = Some(CombatState::Idle);
                 }
             }
+            CombatState::Recoiled { timer } => {
+                timer.tick(time.delta());
+                if timer.just_finished() {
+                    next_state = Some(CombatState::Idle);
+                }
+            }
         }
 
         if let Some(state) = next_state {
@@ -449,16 +429,59 @@ pub fn process_attack_states(
 
 // Güncellenmiş hit_detection sistemi
 pub fn hit_detection(
+    mut commands: Commands, // Kılıcı (Hitbox) silebilmek için eklendi
     mut collision_events: EventReader<CollisionEvent>,
-    mut hitboxes: Query<&mut Hitbox>, // mut yapıldı
-    hurtboxes: Query<&Hurtbox>,       // Yeni: Hurtbox'ları sorguluyoruz [cite: 3]
+    mut hitboxes: Query<&mut Hitbox>, 
+    hurtboxes: Query<&Hurtbox>,       
+    shieldboxes: Query<&ShieldBox>, // YENİ: Kalkan çarpışma kutuları
+    shield_query: Query<(&Shield, &BlockingState)>, // YENİ: Kalkan statları ve durumları
     mut damage_events: EventWriter<DamageEvent>,
     mut stagger_events: EventWriter<StaggerEvent>,
     mut heal_events: EventWriter<HealEvent>,
+    mut recoil_events: EventWriter<RecoilEvent>, // YENİ: Geri tepme olayı
+    mut block_events: EventWriter<BlockEvent>,   // YENİ: Blok olayı
 ) {
     for event in collision_events.read() {
         if let CollisionEvent::Started(e1, e2, _) = event {
-            // İki taraflı kontrol: (e1=Hitbox, e2=Hurtbox)
+            
+            // --- 1. ÖNCELİK: KALKAN ÇARPIŞMASI ---
+            // Kılıç önce kalkana mı çarptı kontrol et
+            if let Some((hitbox_entity, _, attacker, defender)) = check_shield_hit(*e1, *e2, &hitboxes, &shieldboxes) {
+                
+                // Kalkan sahibinin durumunu kontrol et
+                if let Ok((_shield, blocking_state)) = shield_query.get(defender) {
+                    
+                    // Eğer saldıran kişi kendi kalkanına vuruyorsa yoksay
+                    if attacker == defender {
+                        continue;
+                    }
+
+                    match *blocking_state {
+                        BlockingState::Parrying { .. } => {
+                            println!("MÜKEMMEL PARRY! Saldırgan sekti.");
+                            // 1. Kılıcı anında yok et (Hurtbox'a ulaşamasın)
+                            commands.entity(hitbox_entity).despawn_recursive();
+                            // 2. Saldırgana sekme (Recoil) uygula
+                            recoil_events.send(RecoilEvent { target: attacker });
+                            // 3. Blok olayını fırlat (Stamina/VFX için)
+                            block_events.send(BlockEvent { defender, attacker, is_parry: true });
+                            continue; // Bu çarpışma işlendi, sonrakine geç
+                        }
+                        BlockingState::Blocking => {
+                            println!("NORMAL BLOK! Hasar engellendi.");
+                            // 1. Kılıcı yok et
+                            commands.entity(hitbox_entity).despawn_recursive();
+                            // 2. Sekme YOK, sadece blok olayı fırlat
+                            block_events.send(BlockEvent { defender, attacker, is_parry: false });
+                            continue;
+                        }
+                        _ => {} // Idle veya GuardBroken ise kalkan işe yaramaz, kılıç içinden geçer!
+                    }
+                }
+            }
+
+            // --- 2. ÖNCELİK: NORMAL HASAR (HURTBOX) ---
+            // Eğer kalkan tarafından engellenmediyse, normal can yakma işlemini yap
             check_and_apply_hit(
                 *e1,
                 *e2,
@@ -468,7 +491,6 @@ pub fn hit_detection(
                 &mut stagger_events,
                 &mut heal_events,
             );
-            // Veya (e2=Hitbox, e1=Hurtbox)
             check_and_apply_hit(
                 *e2,
                 *e1,
@@ -480,6 +502,28 @@ pub fn hit_detection(
             );
         }
     }
+}
+
+// YENİ YARDIMCI FONKSİYON: Çarpışan objeler Hitbox ve ShieldBox mı?
+fn check_shield_hit(
+    e1: Entity,
+    e2: Entity,
+    hitboxes: &Query<&mut Hitbox>,
+    shieldboxes: &Query<&ShieldBox>,
+) -> Option<(Entity, Entity, Entity, Entity)> {
+    // e1 Hitbox, e2 ShieldBox ise
+    if let Ok(hitbox) = hitboxes.get(e1) {
+        if let Ok(shieldbox) = shieldboxes.get(e2) {
+            return Some((e1, e2, hitbox.owner, shieldbox.owner));
+        }
+    }
+    // e2 Hitbox, e1 ShieldBox ise
+    if let Ok(hitbox) = hitboxes.get(e2) {
+        if let Ok(shieldbox) = shieldboxes.get(e1) {
+            return Some((e2, e1, hitbox.owner, shieldbox.owner));
+        }
+    }
+    None
 }
 
 // Güncellenmiş yardımcı fonksiyon
@@ -570,6 +614,16 @@ pub fn animate_weapon(
                 let (active_pos, active_rot) = get_active_transform(*attack_type);
                 transform.translation = active_pos.lerp(idle_pos, t);
                 transform.rotation = active_rot.slerp(idle_rot, t);
+            }
+            CombatState::Recoiled { timer } => {
+                let t = timer.fraction();
+                // Sekme pozisyonu: Kılıç yukarı ve geriye doğru savrulur
+                let recoil_pos = Vec3::new(0.5, 1.2, 0.5); 
+                let recoil_rot = Quat::from_rotation_x(std::f32::consts::FRAC_PI_4) * Quat::from_rotation_z(0.5);
+                
+                // Silahı sekme pozisyonundan yavaşça Idle (bekleme) pozisyonuna indir
+                transform.translation = recoil_pos.lerp(idle_pos, t);
+                transform.rotation = recoil_rot.slerp(idle_rot, t);
             }
         }
     }
