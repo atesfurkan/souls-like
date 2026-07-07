@@ -41,6 +41,7 @@ pub struct Weapon {
 pub enum WeaponPart {
     Cylinder { radius: f32, height: f32, color: Color },
     Cone { radius: f32, height: f32, color: Color },
+    
     // İleride 3D model eklediğimizde buraya şunu ekleyeceğiz:
     // GltfModel { path: String },
 }

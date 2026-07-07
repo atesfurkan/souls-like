@@ -1,6 +1,7 @@
 use bevy::prelude::*; // Component, Entity, Bundle, Color, Transform vb. için gerekli
 use bevy_rapier3d::prelude::*; // Collider, Sensor, ActiveEvents için gerekli
-use super::components::{BlockingState, EquippedShield, Shield, ShieldBox};
+use super::components::{BlockingState, EquippedShield, Shield,
+    ShieldBox , ShieldVisualAnchor};
 
 // Oyundaki tüm kalkan türlerini tanımlayan liste
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -119,12 +120,19 @@ pub fn build_shield_hierarchy(
     // Ana kalkan entity'si: Çarpışma kutusu buradadır, ancak görünmez bir noktadır (SpatialBundle).
     // Dışarıdaki sistemler (Player) bu çıpayı doğrudan ön kola takar.
     builder.spawn((
-        EquippedShield,
+        ShieldVisualAnchor,
         ShieldBox { owner },
         collider,
+        
         Sensor,
         ActiveEvents::COLLISION_EVENTS,
-        SpatialBundle::default(), 
+        SpatialBundle {
+        // TÜM KALKANI DÖNDÜREN NOKTA BURASI
+        // Bu root entity olduğu için, buradaki rotasyon tüm çocuklarını (board, handle, strap) etkiler.
+        transform: Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, 0.0, 3.0, 3.0)),
+        ..default()
+    },
+         
     )).with_children(|shield_anchor| {
         
         // --- 2. BOARD (Tahta Gövde) ---
@@ -132,7 +140,8 @@ pub fn build_shield_hierarchy(
         shield_anchor.spawn(PbrBundle {
             mesh,
             material,
-            transform: Transform::from_translation(board_offset),
+            transform: Transform::from_translation(board_offset)
+               .with_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
             ..default()
         });
 

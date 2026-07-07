@@ -1,6 +1,7 @@
-use bevy::prelude::Component;
-
 use bevy::prelude::*;
+use bevy::utils::HashMap;
+
+// --- YENİ EKLENEN KEMİK SABİTLERİ ---
 
 #[derive(Resource)]
 pub struct PlayerMovementConfig {
@@ -26,6 +27,11 @@ pub struct PlayerState {
     pub vertical_velocity: f32,
 }
 
-
 #[derive(Component)]
 pub struct Player;
+
+
+
+
+#[derive(Component)]
+pub struct PendingEquipment; // Silah ve kalkanın kemiklere bağlanmayı beklediğini belirtir

@@ -3,6 +3,12 @@ use bevy::utils::{HashMap, HashSet};
 use crate::game::weapon::components::{Weapon, AttackDefinition, AttackType}; 
 
 
+// game/combat/components.rs dosyasına ekle
+#[derive(Component, Default)]
+pub struct GuardIntent {
+    pub offset: Vec2, // Mouse hareketinden gelen X ve Y sapması
+}
+
 #[derive(Component)]
 pub struct Hurtbox {
     pub owner: Entity, // Hasarın uygulanacağı ana entity (Health buradadır)

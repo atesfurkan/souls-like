@@ -11,7 +11,8 @@ pub mod lock_on;
 pub mod weapon;
 pub mod debug_hud;
 pub mod shield;
-
+pub mod animation;
+pub mod ik;
 
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*; 
@@ -34,6 +35,8 @@ impl Plugin for GamePlugin {
             weapon::plugin::WeaponPlugin, 
             debug_hud::plugin::DebugHudPlugin,
             shield::plugin::ShieldPlugin,
+            animation::plugin::AnimationPlugin,
+            ik::plugin::IkPlugin,
         ));
     }
 }

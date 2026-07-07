@@ -1,6 +1,8 @@
 use bevy::prelude::*;
 
-
+// Kalkanın görsel ve çarpışma kökünü temsil eder (Çift component çakışmasını önler)
+#[derive(Component)]
+pub struct ShieldVisualAnchor;
 
 // Kalkanın RPG istatistikleri
 #[derive(Component)]

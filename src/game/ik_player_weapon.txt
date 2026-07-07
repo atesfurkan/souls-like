@@ -1,0 +1,1014 @@
+=== FILE: ik/plugin.rs ===
+use bevy::prelude::*;
+use bevy::transform::TransformSystem; // Bunu import etmen şart
+use crate::game::ik::systems::{solve_two_bone_ik, update_shield_ik_target, maintain_shield_orientation};
+pub struct IkPlugin;
+
+impl Plugin for IkPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(
+            PostUpdate, 
+            (
+                // Önce hedefi belirle
+                update_shield_ik_target,
+                // Sonra kemikleri bük
+                
+                solve_two_bone_ik,
+                maintain_shield_orientation
+            )
+            .chain() // Birbiri ardına çalışmasını garantile
+            // EN ÖNEMLİ SATIR: Bevy dünyayı çizmeden hemen önce araya gir!
+            .before(TransformSystem::TransformPropagate) 
+        );
+    }
+}
+=== FILE: ik/mod.rs ===
+pub mod components;
+pub mod plugin;
+pub mod systems;
+
+=== FILE: ik/components.rs ===
+use bevy::prelude::*;
+
+/// Karakterin belirli bir uzvu için ulaşılması hedeflenen noktayı temsil eder.
+/// Bu bileşen genellikle oyundaki mantık (Combat/Shield) tarafından güncellenir.
+#[derive(Component, Debug, Reflect)]
+pub struct IkTarget {
+    pub position: Vec3, // Hedefin dünya veya lokal koordinattaki pozisyonu
+    /// 0.0 (Tamamen FK/Animasyon) ile 1.0 (Tamamen IK) arası geçiş değeri.
+    /// Smooth interpolation (slerp) için kullanılır.
+    pub weight: f32, 
+}
+
+/// 2-Bone IK algoritmasının ihtiyaç duyduğu kemik zinciri.
+/// (Örn: UpperArm -> Forearm -> Hand)
+#[derive(Component, Debug, Reflect)]
+pub struct TwoBoneIkChain {
+    pub root: Entity, // Kök kemik (Örn: Omuz / LeftArm)
+    pub mid: Entity,  // Orta kemik (Örn: Dirsek / LeftForearm)
+    pub tip: Entity,  // Uç kemik (Örn: El / LeftHand)
+    pub pole_vector: Vec3, // Dirseğin veya dizin bükülme yönünü belirleyen vektör
+}
+
+=== FILE: ik/systems.rs ===
+use super::components::{IkTarget, TwoBoneIkChain};
+use crate::game::combat::components::GuardIntent;
+use crate::game::lock_on::components::LockOnState;
+use crate::game::player::components::Player;
+use crate::game::shield::components::BlockingState;
+use crate::game::shield::components::EquippedShield;
+use bevy::prelude::*;
+use crate::game::shield::components::ShieldVisualAnchor;
+
+// Bu fonksiyonu game/ik/systems.rs dosyasının en altına ekle
+pub fn maintain_shield_orientation(
+    player_query: Query<(Entity, &IkTarget), With<Player>>,
+    // Sadece yeni oluşturduğumuz Anchor'ı arıyoruz
+    anchor_query: Query<(Entity, &Parent), With<ShieldVisualAnchor>>, 
+    mut transforms: Query<&mut Transform>,
+    parents: Query<&Parent>,
+) {
+    let Ok((player_entity, ik_target)) = player_query.get_single() else { return; };
+    if ik_target.weight <= 0.01 { return; }
+
+    let player_global = compute_manual_global_transform(player_entity, &transforms, &parents);
+
+    for (anchor_entity, anchor_parent) in anchor_query.iter() {
+        // Kalkanın bağlı olduğu ön kolun (parent) global rotasyonu
+        let root_global = compute_manual_global_transform(anchor_parent.get(), &transforms, &parents);
+        
+        // Kalkanın orjinal duruş ofseti (shield/data.rs içindeki değer)
+        let base_shield_rot = Quat::from_euler(EulerRot::XYZ, 0.0, 3.0, 3.0);
+        
+        // MUCİZE BURADA: Kalkanın dünyada bakacağı yön = Karakterin baktığı yön + Kalkanın kendi ofseti
+        let desired_global_rot = player_global.rotation * base_shield_rot;
+
+        // Bunu Local Uzaya (Ebeveynin uzayına) çevirerek kolun bükülmesini SIFIRLIYORUZ
+        let target_local_rot = root_global.rotation.inverse() * desired_global_rot;
+
+        if let Ok(mut anchor_transform) = transforms.get_mut(anchor_entity) {
+            anchor_transform.rotation = anchor_transform.rotation.slerp(target_local_rot, ik_target.weight);
+        }
+    }
+}
+pub fn update_shield_ik_target(
+    // Sorguya 'mut TwoBoneIkChain' eklendi!
+    mut query: Query<
+        (
+            &mut IkTarget,
+            &mut TwoBoneIkChain,
+            &GuardIntent,
+            &BlockingState,
+            &Transform,
+        ),
+        With<Player>,
+    >,
+    lock_on: Res<LockOnState>,
+    time: Res<Time>,
+) {
+    for (mut ik_target, mut chain, intent, state, transform) in query.iter_mut() {
+        let is_guarding = lock_on.target.is_some() && matches!(state, BlockingState::Blocking);
+
+        let target_w = if is_guarding { 1.0 } else { 0.0 };
+        ik_target.weight = ik_target.weight.lerp(target_w, time.delta_seconds() * 15.0);
+
+        if ik_target.weight > 0.01 {
+            // 1. Kalkan Hedefi (Elin gideceği nokta)
+            
+            // DÜZELTİLDİ: Eli gövdeye çok daha yakın ve hafif sola aldık.
+            // Z: -0.5'ten -0.2'ye çektik. El göğse yaklaşınca IK mecburen dirseği bükecek (L şekli).
+            // X: -0.15 ile eli tam ortada değil, hafif sol omuza yakın tuttuk (kalkan bloklaması için daha doğal).
+            let local_base_pos = Vec3::new(-0.15, 0.3, -0.2); 
+            
+            let offset_x = intent.offset.x * 0.8; 
+            let offset_y = -intent.offset.y * 0.8; 
+            let offset_z = offset_x.abs() * 0.3; 
+
+            let local_target = local_base_pos + Vec3::new(offset_x, offset_y, offset_z);
+            ik_target.position = transform.transform_point(local_target);
+            
+            // 2. ÇÖZÜM: Pole Vector (Dirseğin bakacağı nokta)
+            // L şeklinin düzgün durması için dirseği TAM SOLA (-X) itiyoruz.
+            let local_pole = Vec3::new(-1.0, 0.0, 0.0);
+            chain.pole_vector = local_pole.normalize_or_zero();
+        }
+
+    }
+}
+
+// Hiyerarşiyi tırmanarak 1-frame gecikmesiz anlık Global Transform hesaplayan yardımcı fonksiyon
+fn compute_manual_global_transform(
+    entity: Entity,
+    transforms: &Query<&mut Transform>,
+    parents: &Query<&Parent>,
+) -> Transform {
+    let mut current_entity = entity;
+    let mut global_transform = Transform::IDENTITY;
+    let mut hierarchy = Vec::new();
+
+    while let Ok(transform) = transforms.get(current_entity) {
+        hierarchy.push(*transform);
+        if let Ok(parent) = parents.get(current_entity) {
+            current_entity = parent.get();
+        } else {
+            break;
+        }
+    }
+
+    for transform in hierarchy.into_iter().rev() {
+        global_transform = global_transform * transform;
+    }
+    global_transform
+}
+
+pub fn solve_two_bone_ik(
+    chain_query: Query<(&TwoBoneIkChain, &IkTarget)>,
+    mut transforms: Query<&mut Transform>,
+    parent_query: Query<&Parent>,
+) {
+    for (chain, target) in chain_query.iter() {
+        if target.weight <= 0.0 {
+            continue;
+        }
+
+        // 1. KEMİK UZUNLUKLARINI LOKAL UZAYDAN ÇEKME
+        // Dirsek omuzun çocuğu, el dirseğin çocuğu olduğu için lokal translation uzunlukları doğrudan kemik boyudur.
+        let len1 = transforms
+            .get(chain.mid)
+            .map(|t| t.translation.length())
+            .unwrap_or(0.001);
+        let len2 = transforms
+            .get(chain.tip)
+            .map(|t| t.translation.length())
+            .unwrap_or(0.001);
+        let total_len = len1 + len2;
+
+        // 2. OMUZUN ANLIK DÜNYA UZAYI (Jitter-Free)
+        let root_parent = parent_query
+            .get(chain.root)
+            .map(|p| p.get())
+            .unwrap_or(chain.root);
+        let root_parent_global =
+            compute_manual_global_transform(root_parent, &transforms, &parent_query);
+
+        let root_local = transforms.get(chain.root).cloned().unwrap_or_default();
+        let root_global_pos = (root_parent_global * root_local).translation;
+
+        // 3. HEDEFE YÖNELİK SOFT IK HESAPLAMASI
+        let mut dir_target = target.position - root_global_pos;
+        let mut dist_target = dir_target.length();
+        let dir_target_norm = dir_target.normalize_or_zero();
+
+        let d_max = total_len * 0.95;
+
+        if dist_target > d_max {
+            // Soft IK Formülü uygulaması
+            let diff = dist_target - d_max;
+            let max_extend = total_len - d_max;
+            dist_target = d_max + max_extend * (1.0 - (-diff / max_extend).exp());
+        } else {
+            dist_target = dist_target.max(0.001); // 0'a bölme hatasını engelle
+        }
+
+        // 4. KUTUPSAL VEKTÖR (POLE VECTOR) DÖNÜŞÜMÜ
+        // Pole Vector'u karakterin (root_parent) dönüş yönüne göre hizala
+        let global_pole_vector = root_parent_global.rotation * chain.pole_vector;
+        let mut bend_normal = dir_target_norm
+            .cross(global_pole_vector)
+            .normalize_or_zero();
+
+        if bend_normal == Vec3::ZERO {
+            bend_normal = dir_target_norm.cross(Vec3::Y).normalize_or_zero();
+        }
+
+        // 5. İÇ AÇI (KOSİNÜS TEOREMİ) VE YENİ POZİSYONLAR
+        let cos_angle_root = ((len1 * len1) + (dist_target * dist_target) - (len2 * len2))
+            / (2.0 * len1 * dist_target);
+        let angle_root = cos_angle_root.clamp(-1.0, 1.0).acos();
+
+        let new_mid_dir = Quat::from_axis_angle(bend_normal, angle_root) * dir_target_norm;
+
+        let root_global_rot = (root_parent_global * root_local).rotation;
+
+        // Varsayılan kolların uzanma eksenini (Forward) belirliyoruz. Mixamo riglerinde genellikle Y veya -Y eksenidir.
+        let default_bone_dir = transforms
+            .get(chain.mid)
+            .map(|t| t.translation.normalize_or_zero())
+            .unwrap_or(Vec3::Y);
+        let current_mid_global_dir = root_global_rot * default_bone_dir;
+
+        // 6. OMUZ VE DİRSEK LOKAL ROTASYON YAZIMI
+        let root_rot_diff = Quat::from_rotation_arc(current_mid_global_dir, new_mid_dir);
+        let target_root_global_rot = root_rot_diff * root_global_rot;
+
+        // Global rotasyonu Root'un ebeveynine göre Lokal'e çeviriyoruz
+        let target_root_local_rot = root_parent_global.rotation.inverse() * target_root_global_rot;
+
+        if let Ok(mut root_transform) = transforms.get_mut(chain.root) {
+            root_transform.rotation = root_transform
+                .rotation
+                .slerp(target_root_local_rot, target.weight);
+        }
+
+        // Dirsek (Mid) dönüşü lokal eksende bükülme açısına eşittir.
+        // Omuz zaten doğru yöne döndüğü için, dirseği sadece 'bend_normal' etrafında bükmek yeterlidir.
+        let cos_angle_mid =
+            ((len1 * len1) + (len2 * len2) - (dist_target * dist_target)) / (2.0 * len1 * len2);
+        let angle_mid = cos_angle_mid.clamp(-1.0, 1.0).acos();
+
+        // Düz kol açısı PI'dir, bükülme miktarı PI - angle_mid
+        let bend_amount = std::f32::consts::PI - angle_mid;
+        let mid_local_rot = Quat::from_axis_angle(Vec3::X, bend_amount); // Mixamo'da diz/dirsek bükülme ekseni X veya Z olabilir, rig'e göre test edilmeli.
+        if let Ok(mut mid_transform) = transforms.get_mut(chain.mid) {
+            // Quat::IDENTITY yerine kemiğin o anki animasyon rotasyonunu al!
+            let base_rot = mid_transform.rotation;
+            mid_transform.rotation = base_rot.slerp(mid_local_rot, target.weight);
+        }
+    }
+}
+
+=== FILE: player/plugin.rs ===
+use bevy::prelude::*;
+use super::systems::{player_movement , handle_weapon_swap_input,
+    attach_pending_equipment , auto_fit_player_collider };
+//use super::spawn::spawn_player;
+use super::components::{Player, PlayerState, PlayerMovementConfig};
+use crate::game::player::spawn::spawn_player;
+use crate::game::player::systems::update_guard_intent;
+use crate::game::ik::systems::update_shield_ik_target;
+
+
+pub struct PlayerPlugin;
+
+impl Plugin for PlayerPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<PlayerMovementConfig>() // Config sisteme kaydedildi
+           .add_systems(Startup, spawn_player)
+           .add_systems(Update, (player_movement, handle_weapon_swap_input,
+                attach_pending_equipment , update_guard_intent , auto_fit_player_collider))
+           .add_systems(Update, (update_guard_intent, update_shield_ik_target));
+    }
+}
+
+
+=== FILE: player/spawn.rs ===
+use super::components::{Player, PlayerMovementConfig, PlayerState,
+    PendingEquipment};
+use crate::game::combat::components::{AttackIntent, CombatState, EquippedWeapon, Hurtbox};
+use crate::game::health::components::Health;
+use crate::game::stamina::components::Stamina;
+use crate::game::weapon::components::{WeaponType};
+use crate::game::weapon::data::get_weapon_data;
+use crate::game::shield::data::{get_shield_stats_bundle, build_shield_hierarchy, ShieldType};
+use crate::game::animation::components::{CharacterBones, AnimationIntent};
+use bevy::prelude::*;
+use bevy_rapier3d::prelude::*;
+use crate::game::combat::components::GuardIntent;
+use crate::game::shield::components::EquippedShield;
+use crate::game::ik::components::IkTarget;
+use crate::game::shield::components::BlockingState;
+
+
+pub fn spawn_player(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    asset_server: Res<AssetServer>, // Modeli yüklemek için AssetServer eklendi
+) {
+    let player_entity = commands.spawn_empty().id();
+
+    // 3D Modeli yüklüyoruz
+    let character_scene = asset_server.load("models/character.glb#Scene0");
+
+    // Ana oyuncu kapsülü (Ebeveyn / Parent) - Artık görünmez bir mantık/fiziksel obje
+    commands
+        .entity(player_entity)
+        .insert((
+
+            GuardIntent::default(),
+            IkTarget { 
+                position: Vec3::ZERO, // Başlangıçta önemsiz
+                weight: 0.0,          // Başlangıçta IK kapalı
+            },
+    
+    ))
+        .insert((
+            SpatialBundle {
+                transform: Transform::from_xyz(0.0, 3.0, 0.0),
+                ..default()
+            },
+            Player,
+            CharacterBones::default(),
+            AnimationIntent::default(),
+            PlayerState::default(),
+            CombatState::default(), // Başlangıçta Idle
+            AttackIntent::default(),
+
+            
+            Health::new(100.0), // Oyuncunun canı
+            Hurtbox {
+                owner: player_entity,
+            }, // Oyuncunun hasar alma kutusu (sahibi kendisi)
+            Stamina::default(),
+            RigidBody::KinematicPositionBased,
+            Collider::capsule_y(0.5, 0.5), // Çarpışma motoru için fiziksel kapsül korunuyor
+            KinematicCharacterController::default(),
+            get_weapon_data(WeaponType::VampireBlade),
+            get_shield_stats_bundle(ShieldType::KiteShield),
+            
+            
+        ))
+        .with_children(|parent| {
+            
+            // --- 3D MODEL (GLTF/GLB) ---
+            parent.spawn(SceneBundle {
+                scene: character_scene,
+                // Kapsülün tam ortasında doğmaması, ayaklarının yere basması için -1.0 Y ofseti veriyoruz.
+                // Kendi modelinin boyutuna göre bu ofseti ileride ayarlayabilirsin.
+                transform: Transform::from_xyz(0.0, -1.0, 0.0)
+                    .with_rotation(Quat::from_rotation_y(std::f32::consts::PI)), 
+                ..default()
+            });
+
+            // --- SİLAH (Bağlanmayı bekliyor) ---
+            parent.spawn((
+                SpatialBundle {
+                    // Silahın elde doğru durması için gereken rotasyon ofsetleri
+                    // (Bu değerleri Mixamo rig'ine göre ileride ince ayar yapabiliriz)
+                    transform: Transform::from_xyz(0.0, 0.0, 0.0)
+                        .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_4)),
+                    ..default()
+                },
+                EquippedWeapon,
+                PendingEquipment, // Kemik sistemi yüklenince el kemiğine bağlanacak
+            ));
+
+            // --- KALKAN (Bağlanmayı bekliyor) ---
+            parent.spawn((
+                SpatialBundle {
+                    transform: Transform::from_rotation(Quat::from_rotation_z(std::f32::consts::PI)),
+                    ..default()
+                },
+                
+                
+                EquippedShield, 
+                GuardIntent::default(),
+                IkTarget { position: Vec3::ZERO, weight: 0.0 }, // <-- BU EKSİK OLABİLİR!
+                BlockingState::Idle,
+                
+                PendingEquipment, // Kemik sistemi yüklenince sol kol kemiğine bağlanacak
+                ShieldType::KiteShield,
+                
+            )).with_children(|shield_root| {
+                // Kalkanın görsel hiyerarşisini bu geçici kökün içine inşa ediyoruz.
+                // Tüm bu yapı daha sonra sol kola transfer edilecek.
+                build_shield_hierarchy(shield_root, ShieldType::TowerShield, player_entity, &mut meshes, &mut materials);
+            });
+            
+        });
+}
+=== FILE: player/mod.rs ===
+pub mod components;
+pub mod plugin;
+pub mod systems;
+pub mod spawn;
+
+=== FILE: player/components.rs ===
+use bevy::prelude::*;
+use bevy::utils::HashMap;
+
+// --- YENİ EKLENEN KEMİK SABİTLERİ ---
+
+#[derive(Resource)]
+pub struct PlayerMovementConfig {
+    pub walk_speed: f32,
+    pub sprint_speed: f32,
+    pub jump_velocity: f32,
+    pub gravity: f32,
+}
+
+impl Default for PlayerMovementConfig {
+    fn default() -> Self {
+        Self {
+            walk_speed: 4.0,
+            sprint_speed: 8.0,
+            jump_velocity: 15.0,
+            gravity: -15.0,
+        }
+    }
+}
+
+#[derive(Component, Default)]
+pub struct PlayerState {
+    pub vertical_velocity: f32,
+}
+
+#[derive(Component)]
+pub struct Player;
+
+
+
+
+#[derive(Component)]
+pub struct PendingEquipment; // Silah ve kalkanın kemiklere bağlanmayı beklediğini belirtir
+=== FILE: player/systems.rs ===
+use bevy::prelude::*;
+use bevy_rapier3d::prelude::*;
+use bevy::utils::HashMap;
+use crate::game::common::components::MainCamera;
+use crate::game::stamina::components::Stamina;
+use crate::game::dodge::components::DodgeState;
+use crate::game::combat::components::{CombatState, EquippedWeapon,
+      AttackIntent};
+use crate::game::lock_on::components::LockOnState;
+use crate::game::weapon::components::{Weapon, AttackDefinition,
+     AttackType };
+use crate::game::weapon::events::WeaponSwapRequestEvent;
+use super::components::{Player, PlayerState, PlayerMovementConfig, 
+    PendingEquipment}; 
+use crate::game::shield::data::ShieldType; // bu ne alaka burada?
+use crate::game::animation::components::{CharacterBones,AnimationIntent};
+
+use bevy::input::mouse::MouseMotion; // Gerekli import
+
+use crate::game::combat::components::GuardIntent;
+use crate::game::shield::components::BlockingState;
+use crate::game::ik::components::TwoBoneIkChain;
+
+use bevy::render::primitives::Aabb;
+
+pub fn auto_fit_player_collider(
+    mut player_query: Query<(Entity, &mut Collider), With<Player>>,
+    children_query: Query<&Children>,
+    aabb_query: Query<&Aabb>,
+    // Bu sistemin her frame çalışmasını engellemek için bir bayrak tutuyoruz
+    mut is_fitted: Local<bool>, 
+) {
+    if *is_fitted { return; }
+
+    for (player_entity, mut collider) in player_query.iter_mut() {
+        let mut min = Vec3::splat(f32::MAX);
+        let mut max = Vec3::splat(f32::MIN);
+        let mut found_mesh = false;
+
+        // Karakterin içindeki tüm 3D model parçalarını (meshleri) tara
+        for descendant in children_query.iter_descendants(player_entity) {
+            if let Ok(aabb) = aabb_query.get(descendant) {
+                let center = Vec3::from(aabb.center);
+                let half_extents = Vec3::from(aabb.half_extents);
+                
+                // Modelin en uç noktalarını hesapla
+                min = min.min(center - half_extents);
+                max = max.max(center + half_extents);
+                found_mesh = true;
+            }
+        }
+
+        if found_mesh {
+            // Modelin toplam boyutlarını (genişlik, yükseklik, derinlik) bul
+            let size = max - min;
+            
+            // Kapsülün yarıçapı, karakterin X (genişlik) veya Z (derinlik) eksenindeki en büyük değerinin yarısıdır
+            let radius = (size.x.max(size.z)) / 2.0;
+            
+            // Rapier kapsülünde 'half_height', silindir kısmının yarısıdır (toplam boydan küreleri çıkarıyoruz)
+            let half_height = (size.y / 2.0) - radius;
+
+            // Kapsülü karakterin gerçek 3D vücut ölçüleriyle GÜNCELLE!
+            *collider = Collider::capsule_y(half_height.max(0.1), radius.max(0.1));
+            
+            println!("BAŞARILI: Oyuncu fiziği 3D modele göre otomatik sarıldı! Yarıçap: {:.2}", radius);
+            *is_fitted = true; 
+        }
+    }
+}
+
+
+pub fn update_guard_intent(
+    mut mouse_motion: EventReader<MouseMotion>,
+    lock_on: Res<LockOnState>,
+    mut query: Query<(&mut GuardIntent, &BlockingState), With<Player>>,
+) {
+    if lock_on.target.is_none() { 
+        return; }
+
+    for (mut intent, state) in query.iter_mut() {
+        // Sadece Blocking durumunda kalkan yönlendirilebilir
+        if matches!(state, BlockingState::Blocking) {
+            for motion in mouse_motion.read() {
+                //println!("DEBUG: Fare hareketi algılandı: {:?}", motion.delta); // Bu yazıyor mu?
+                // Hassasiyet ayarı (ileride config'e alınabilir)
+                let sensitivity = 0.005;
+                intent.offset += motion.delta * sensitivity;
+                
+                // İnsan anatomisi sınırı (Kalkanı çok uzağa savurma)
+                intent.offset = intent.offset.clamp(Vec2::splat(-0.5), Vec2::splat(0.5));
+            }
+        } else {
+            // Bloklamıyorsak intent'i merkeze sıfırla
+            intent.offset = intent.offset.lerp(Vec2::ZERO, 0.1);
+        }
+    }
+}
+
+
+// player/systems.rs
+pub fn attach_pending_equipment(
+    mut commands: Commands,
+    // DİKKAT: Entity'i de sorguya ekledik ki Player'a ulaşabilelim
+    character_query: Query<(Entity, &CharacterBones)>, 
+    equipment_query: Query<(Entity, Option<&EquippedWeapon>, Option<&ShieldType>), With<PendingEquipment>>,
+) {
+    if equipment_query.is_empty() { return; }
+
+    for (player_entity, bones) in character_query.iter() {
+        if !bones.is_linked { continue; }
+
+        for (eq_entity, is_weapon, is_shield) in equipment_query.iter() {
+            if is_weapon.is_some() {
+                if let Some(right_hand) = bones.right_hand {
+                    commands.entity(eq_entity)
+                        .remove::<PendingEquipment>()
+                        .insert(Transform::IDENTITY);
+                    commands.entity(right_hand).add_child(eq_entity);
+                }
+            } else if is_shield.is_some() {
+                if let Some(left_forearm) = bones.left_forearm {
+                    commands.entity(eq_entity)
+                        .remove::<PendingEquipment>()
+                        .insert(Transform::IDENTITY);
+                    commands.entity(left_forearm).add_child(eq_entity);
+                    println!("DEBUG: Kalkan ön kola (left_forearm) bağlandı.");
+                    
+                    // --- IK ZİNCİRİ KONTROLÜ ---
+                    if let (Some(arm), Some(hand)) = (bones.left_arm, bones.left_hand) {
+                        commands.entity(player_entity).insert(TwoBoneIkChain {
+                            root: arm,
+                            mid: left_forearm,
+                            tip: hand,
+                            pole_vector: Vec3::new(-1.0, -1.0, -1.0),
+                        });
+                        println!("BAŞARILI: IK Zinciri oyuncuya bağlandı!");
+                    } else {
+                        // EĞER KEMİKLER EKSİKSE BURAYA DÜŞECEK
+                        println!("HATA: Kalkan bağlandı ama Omuz (left_arm) veya El (left_hand) kemiği BULUNAMADI!");
+                        println!("Mevcut Kemikler -> Arm: {:?}, Hand: {:?}", bones.left_arm, bones.left_hand);
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+
+pub fn handle_weapon_swap_input(
+    keyboard_input: Res<ButtonInput<KeyCode>>,
+    mut swap_events: EventWriter<WeaponSwapRequestEvent>,
+    player_query: Query<(Entity, &CombatState), With<Player>>,
+) {
+    // 1 tuşuna basılıp basılmadığını kontrol et
+    if keyboard_input.just_pressed(KeyCode::Digit1) {
+        if let Ok((entity, combat_state)) = player_query.get_single() {
+            // Edge Case kontrolü: Sadece Idle durumundayken silah değiştirilebilir
+            if *combat_state == CombatState::Idle {
+                swap_events.send(WeaponSwapRequestEvent { entity });
+            }
+        }
+    }
+}
+
+pub fn player_movement(
+    keys: Res<ButtonInput<KeyCode>>,
+    time: Res<Time>,
+    config: Res<PlayerMovementConfig>, 
+    lock_on: Res<LockOnState>,
+    mut player_query: Query<(
+        &mut Transform, 
+        &mut KinematicCharacterController,
+        Option<&KinematicCharacterControllerOutput>, // Yere değme kontrolü
+        &mut PlayerState, // Dikey hız hafızası
+        &mut Stamina,
+        &mut AnimationIntent, // YENİ: Animasyon niyetimizi buraya yazacağız
+    ), (With<Player>, Without<DodgeState>)>,
+    camera_query: Query<&Transform, (With<MainCamera>, Without<Player>)>,
+    target_query: Query<&Transform, (Without<Player>, Without<MainCamera>)>, 
+) {
+    // Artık 6. eleman olarak intent'i de alıyoruz
+    let Ok((mut player_transform, mut controller, output, mut state, mut stamina, mut intent)) = player_query.get_single_mut() else { return };
+    let Ok(camera_transform) = camera_query.get_single() else { return };
+
+    let mut direction = Vec3::ZERO;
+
+    let forward = camera_transform.forward();
+    let forward_flat = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
+    let right = camera_transform.right();
+    let right_flat = Vec3::new(right.x, 0.0, right.z).normalize_or_zero();
+    
+    if keys.pressed(KeyCode::KeyW) { direction += forward_flat; }
+    if keys.pressed(KeyCode::KeyS) { direction -= forward_flat; }
+    if keys.pressed(KeyCode::KeyD) { direction += right_flat; }
+    if keys.pressed(KeyCode::KeyA) { direction -= right_flat; }
+
+    // --- MANTIKSAL HAREKET VE SPRINT KONTROLÜ ---
+    let mut is_moving = false;
+    let mut is_sprinting = false;
+    let mut speed = config.walk_speed;
+
+    if direction != Vec3::ZERO {
+        is_moving = true; // Karakter hareket etmeye çalışıyor
+        
+        if keys.pressed(KeyCode::ShiftLeft) {
+            let cost = stamina.sprint_cost * time.delta_seconds();
+            if stamina.try_drain(cost) {
+                speed = config.sprint_speed;
+                is_sprinting = true; // Karakter koşmaya çalışıyor ve staminası var
+            }
+        }
+    }
+
+    
+    let mut movement = direction.normalize_or_zero() * speed * time.delta_seconds();
+    
+    // --- ZIPLAMA VE YERÇEKİMİ ---
+    let is_grounded = match output {
+        Some(out) => out.grounded,
+        None => false,
+    };
+    
+    // Niyetleri Animation Modülüne bildir
+    intent.is_moving = is_moving;
+    intent.is_sprinting = is_sprinting;
+    intent.is_in_air = !is_grounded; // YENİ: Yerde değilsek havadayızdır lan 
+
+    if is_grounded {
+        state.vertical_velocity = -0.1;
+        if keys.just_pressed(KeyCode::Space) {
+            let cost = stamina.jump_cost;
+            state.vertical_velocity = config.jump_velocity;
+            stamina.try_drain(cost);
+        }
+    } else {
+        state.vertical_velocity += config.gravity * time.delta_seconds();
+    }
+    
+    movement.y = state.vertical_velocity * time.delta_seconds();
+    controller.translation = Some(movement);
+
+    // --- ROTASYON MANTIĞI ---
+    if let Some(target_entity) = lock_on.target {
+        if let Ok(target_transform) = target_query.get(target_entity) {
+            let target_pos = Vec3::new(
+                target_transform.translation.x, 
+                player_transform.translation.y, 
+                target_transform.translation.z
+            );
+            player_transform.look_at(target_pos, Vec3::Y);
+        }
+    } else {
+        if direction != Vec3::ZERO {
+            let target_position = player_transform.translation + direction;
+            player_transform.look_at(target_position, Vec3::Y);
+        }
+    }
+}
+=== FILE: weapon/plugin.rs ===
+use bevy::prelude::*;
+use crate::game::weapon::systems::{auto_spawn_weapon_visuals, process_weapon_swap};
+use crate::game::weapon::events::WeaponSwapRequestEvent;
+pub struct WeaponPlugin;
+
+impl Plugin for WeaponPlugin {
+    fn build(&self, app: &mut App) {
+        // Event'i register ediyoruz
+        app.add_event::<WeaponSwapRequestEvent>();
+        
+        // Silahların görsel parçalarını otomatik oluşturan ve değişimleri yöneten sistemler 
+        app.add_systems(Update, (
+            auto_spawn_weapon_visuals,
+            process_weapon_swap,
+        ));
+    }
+}
+
+=== FILE: weapon/mod.rs ===
+pub mod components;
+pub mod data;
+pub mod plugin;
+pub mod systems;
+pub mod events;
+=== FILE: weapon/components.rs ===
+use bevy::prelude::*;
+use bevy::utils::HashMap;
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AttackType {
+    Thrust,
+    Overhead,
+    LeftSwing,
+    RightSwing,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WeaponType {
+    Spear,
+    VampireBlade,
+}
+
+// Tek bir saldırının tüm özellikleri
+#[derive(Clone)]
+pub struct AttackDefinition {
+    pub windup_duration: f32,
+    pub active_duration: f32,
+    pub recovery_duration: f32,
+    pub stamina_cost: f32,
+    pub damage: f32,
+    pub hitbox_radius: f32,
+    pub hitbox_offset: Vec3,
+    pub lifesteal: f32, // YENİ: Vuruş başına kazanılacak can miktarı
+}
+
+#[derive(Component)]
+pub struct Weapon {
+    pub name: String,              // YENİ: HUD için silahın görünen adı
+    pub weapon_type: WeaponType,   // YENİ: Mantıksal kontroller için silah tipi
+    pub attacks: HashMap<AttackType, AttackDefinition>,
+    pub visuals: WeaponVisuals,
+}
+
+pub enum WeaponPart {
+    Cylinder { radius: f32, height: f32, color: Color },
+    Cone { radius: f32, height: f32, color: Color },
+    
+    // İleride 3D model eklediğimizde buraya şunu ekleyeceğiz:
+    // GltfModel { path: String },
+}
+
+pub struct WeaponVisuals {
+    pub parts: Vec<(WeaponPart, Transform)>, // Hangi parça nerede duracak?
+}
+
+#[derive(Component)]
+pub struct WeaponChildrenCreated;
+=== FILE: weapon/events.rs ===
+use bevy::prelude::*;
+
+#[derive(Event)]
+pub struct WeaponSwapRequestEvent {
+    pub entity: Entity, // Silahı değiştiren varlık (Örn: Player)
+}
+
+=== FILE: weapon/data.rs ===
+use bevy::utils::HashMap;
+use bevy::prelude::*; // Vec3 için gerekli
+use crate::game::weapon::components::{Weapon, AttackDefinition, 
+    AttackType , WeaponVisuals ,
+     WeaponPart , WeaponType};
+
+const WOOD_COLOR: Color = Color::srgb(0.4, 0.2, 0.1);
+const METAL_COLOR: Color = Color::srgb(0.8, 0.8, 0.8);
+const BLOOD_RED: Color = Color::srgb(0.8, 0.1, 0.1);
+
+
+
+pub fn get_weapon_data(weapon_type: WeaponType) -> Weapon {
+    match weapon_type {
+        WeaponType::Spear => Weapon {
+            name: "Guard Spear".to_string(), // YENİ: UI'da görünecek havalı isim
+            weapon_type: WeaponType::Spear,       // YENİ: Enum referansı
+            attacks: HashMap::from([
+                (AttackType::Thrust, AttackDefinition {
+                    windup_duration: 0.3, active_duration: 0.2, recovery_duration: 0.5,
+                    stamina_cost: 15.0, damage: 25.0, hitbox_radius: 0.3, hitbox_offset: Vec3::new(0.0, 0.8, -1.5),
+                    lifesteal: 0.0, // Mevcut silahlarda lifesteal yok
+                }),
+                (AttackType::Overhead, AttackDefinition {
+                    windup_duration: 0.5, active_duration: 0.2, recovery_duration: 0.7,
+                    stamina_cost: 25.0, damage: 40.0, hitbox_radius: 0.4, hitbox_offset: Vec3::new(0.0, 0.5, -1.0),
+                    lifesteal: 0.0,
+                }),
+                (AttackType::LeftSwing, AttackDefinition {
+                    windup_duration: 0.4, active_duration: 0.2, recovery_duration: 0.6,
+                    stamina_cost: 20.0, damage: 20.0, hitbox_radius: 0.6, hitbox_offset: Vec3::new(0.0, 1.0, -0.8),
+                    lifesteal: 0.0,
+                }),
+                (AttackType::RightSwing, AttackDefinition {
+                    windup_duration: 0.4, active_duration: 0.2, recovery_duration: 0.6,
+                    stamina_cost: 20.0, damage: 20.0, hitbox_radius: 0.6, hitbox_offset: Vec3::new(0.0, 1.0, -0.8),
+                    lifesteal: 0.0,
+                }),
+            ]),
+            visuals: WeaponVisuals {
+                parts: vec![
+                    (WeaponPart::Cylinder { radius: 0.05, height: 2.0, color: WOOD_COLOR }, Transform::IDENTITY),
+                    (WeaponPart::Cone { radius: 0.1, height: 0.4, color: METAL_COLOR }, Transform::from_xyz(0.0, 1.2, 0.0)),
+                ],
+            },
+        },
+        
+        // YENİ: Lifesteal özelliğine sahip silahımız
+        WeaponType::VampireBlade => Weapon {
+            name: "Vampire Blade".to_string(), // YENİ: UI'da görünecek havalı isim
+            weapon_type: WeaponType::VampireBlade,       // YENİ: Enum referansı
+            attacks: HashMap::from([
+                (AttackType::RightSwing, AttackDefinition {
+                    windup_duration: 0.4, active_duration: 0.2, recovery_duration: 0.6,
+                    stamina_cost: 20.0, damage: 15.0, hitbox_radius: 0.5, hitbox_offset: Vec3::new(0.0, 1.0, -1.0),
+                    lifesteal: 5.0, // Başarılı vuruş başına 5 birim can çalar
+                }),
+                (AttackType::Thrust, AttackDefinition {
+                    windup_duration: 0.3, active_duration: 0.2, recovery_duration: 0.5,
+                    stamina_cost: 15.0, damage: 20.0, hitbox_radius: 0.3, hitbox_offset: Vec3::new(0.0, 0.8, -1.5),
+                    lifesteal: 4.0, // Başarılı vuruş başına 5 birim can çalar
+                }),
+            ]),
+            visuals: WeaponVisuals {
+                parts: vec![
+                    // Görsel olarak farklılaşması için kan kırmızısı ve biraz daha kısa bir silindir
+                    (WeaponPart::Cylinder { radius: 0.06, height: 1.5, color: BLOOD_RED }, Transform::IDENTITY),
+                    (WeaponPart::Cone { radius: 0.12, height: 0.5, color: METAL_COLOR }, Transform::from_xyz(0.0, 1.0, 0.0)),
+                ],
+            },
+        },
+        _ => panic!("Silah ismi bulunamadı!"),
+    }
+}
+=== FILE: weapon/systems.rs ===
+use bevy::prelude::*;
+use crate::game::combat::components::EquippedWeapon;
+use crate::game::weapon::components::{Weapon, WeaponPart, WeaponChildrenCreated, WeaponType};
+use crate::game::weapon::events::WeaponSwapRequestEvent;
+use crate::game::weapon::data::get_weapon_data;
+
+use crate::game::player::components::PendingEquipment; // <-- Bunu importların arasına ekle!
+
+pub fn process_weapon_swap(
+    mut events: EventReader<WeaponSwapRequestEvent>,
+    mut commands: Commands,
+    mut root_query: Query<&mut Weapon>,
+    equipped_query: Query<Entity, With<EquippedWeapon>>,
+    parent_query: Query<&Parent>,
+) {
+    for event in events.read() {
+        if let Ok(mut weapon) = root_query.get_mut(event.entity) {
+            println!("🔄 SWAP İSTEĞİ GELDİ! Şu anki Silah: {:?}", weapon.weapon_type);
+            // İki silah arasında geçiş yap
+            let next_weapon_type = match weapon.weapon_type {
+                WeaponType::Spear => WeaponType::VampireBlade,
+                _ => WeaponType::Spear,
+            };
+            println!("➡️ Hedeflenen Yeni Silah: {:?}", next_weapon_type);
+            // 1. İstatistikleri ve görsel tanımları Root Entity'de güncelle
+            *weapon = get_weapon_data(next_weapon_type);
+
+            // 2. ESKİ SİLAHI TAMAMEN SİL (Sadece mesh'leri değil, tutucunun kendisini de yok et)
+            for equipped_entity in equipped_query.iter() {
+                let mut current_entity = equipped_entity;
+                let mut is_owned_by_event_entity = false;
+
+                while let Ok(parent) = parent_query.get(current_entity) {
+                    if parent.get() == event.entity {
+                        is_owned_by_event_entity = true;
+                        break;
+                    }
+                    current_entity = parent.get();
+                }
+
+                if is_owned_by_event_entity {
+                    // despawn_descendants yerine despawn_recursive kullanıyoruz!
+                    commands.entity(equipped_entity).despawn_recursive();
+                }
+            }
+
+            // 3. YENİ TEMİZ BİR SİLAH TUTUCU YARAT VE KEMİĞE BAĞLANMASINI İSTE
+            let new_weapon_entity = commands.spawn((
+                SpatialBundle {
+                    // Silahın elde doğru açıyla durması için varsayılan rotasyon offseti
+                    transform: Transform::from_xyz(0.0, 0.0, 0.0)
+                        .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_4)),
+                    ..default()
+                },
+                EquippedWeapon,
+                PendingEquipment, // Animasyon modülümüz bunu görüp sağ ele bağlayacak!
+            )).id();
+
+            // Yeni silahı geçici olarak ana karaktere çocuk olarak ekliyoruz ki sistemler sahibini bilsin
+            commands.entity(event.entity).add_child(new_weapon_entity);
+
+            // 4. auto_spawn_weapon_visuals sistemini tetiklemek için marker'ı sil
+            commands.entity(event.entity).remove::<WeaponChildrenCreated>();
+        }
+    }
+}
+
+pub fn auto_spawn_weapon_visuals(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    query: Query<(Entity, &Weapon), Without<WeaponChildrenCreated>>,
+    equipped_query: Query<Entity, With<EquippedWeapon>>,
+    parent_query: Query<&Parent>, // YENİ: Hiyerarşide yukarı çıkmak için
+) {
+    for (owner_entity, weapon) in query.iter() {
+        
+        // DEBUG 1: Sistem çalıştı ve silahsız bir karakter buldu!
+        println!("🛠️ DEBUG: auto_spawn_weapon_visuals TETIKLENDI! Silah Sahibi (Owner): {:?}", owner_entity);
+        let mut holder_entity = None;
+
+        // Tüm EquippedWeapon'ları tara ve hangisinin bu 'owner_entity'ye ait olduğunu bul
+        for equipped_entity in equipped_query.iter() {
+            let mut current_entity = equipped_entity;
+            
+            // Yukarı doğru tırmanarak kontrol et
+            while let Ok(parent) = parent_query.get(current_entity) {
+                if parent.get() == owner_entity {
+                    holder_entity = Some(equipped_entity);
+                    break;
+                }
+                current_entity = parent.get();
+            }
+
+            if holder_entity.is_some() {
+                break;
+            }
+        }
+
+        // Eğer eli bulduysak, silah görsellerini karakterin kendisine değil, eline (holder_entity) ekle!
+        if let Some(holder) = holder_entity {
+            // DEBUG 2: Hiyerarşide tırmanıp el kemiğini bulmayı başardı!
+            println!("✅ DEBUG: Silah tutucu (El/Holder) BULUNDU! Holder Entity: {:?}", holder);
+            commands.entity(holder).with_children(|parent| {
+                for (part, transform) in &weapon.visuals.parts {
+                    match part {
+                        WeaponPart::Cylinder { radius, height, color } => {
+                            parent.spawn(PbrBundle {
+                                mesh: meshes.add(Cylinder { radius: *radius, half_height: *height / 2.0 }),
+                                material: materials.add(*color),
+                                transform: *transform,
+                                ..default()
+                            });
+                        }
+                        WeaponPart::Cone { radius, height, color } => {
+                            parent.spawn(PbrBundle {
+                                mesh: meshes.add(Cone { radius: *radius, height: *height }),
+                                material: materials.add(*color),
+                                transform: *transform,
+                                ..default()
+                            });
+                        }
+                    }
+                }
+            });
+
+            // İşlemi bir kez yap ve ana karakteri işaretle
+            commands.entity(owner_entity).insert(WeaponChildrenCreated);
+            println!("✅ DEBUG: Silah görselleri eklendi ve karakter WeaponChildrenCreated ile işaretlendi.");
+            
+        } else {
+            // DEBUG 3: Karakter var ama EquippedWeapon etiketli bir çocuk bulunamadı!
+            println!("❌ DEBUG HATA: Karakter ({:?}) için 'EquippedWeapon' taşıyan bir alt obje BULUNAMADI!", owner_entity);
+        }
+    }
+}

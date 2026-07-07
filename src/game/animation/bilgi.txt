@@ -1,0 +1,11 @@
+Mixamo karakterleri genellikle +Z eksenine (bize doğru) bakar,
+ ancak Bevy'nin look_at fonksiyonu varsayılan olarak karakterin -Z eksenine 
+baktığını varsayar.
+ Bu yüzden karakter "Hedefe bak" komutunu aldığında tam tersine döner.
+
+Bunu çözmenin en temiz yolu, spawn.rs içinde 3D modeli (character_scene)
+ yüklediğin kısımda Transform'a 180 derecelik bir başlangıç rotasyonu eklemektir:
+Rust
+
+transform: Transform::from_xyz(0.0, -1.0, 0.0)
+    .with_rotation(Quat::from_rotation_y(std::f32::consts::PI)),

@@ -25,8 +25,7 @@ pub fn spawn_enemy(
     let enemy_entity = commands.spawn_empty().id();
 
     let enemy_material = materials.add(Color::srgb(0.8, 0.1, 0.1));
-    let weapon_wood = materials.add(Color::srgb(0.4, 0.2, 0.1));
-    let weapon_metal = materials.add(Color::srgb(0.8, 0.8, 0.8));
+    
     
 
     commands.entity(enemy_entity).insert((
