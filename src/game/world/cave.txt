@@ -1,0 +1,1695 @@
+=== FILE: ./debug/mod.rs ===
+pub mod gizmos;
+
+use bevy::prelude::*;
+use gizmos::{draw_reference_grid, draw_layout_graph,
+    };
+
+pub struct DebugPlugin;
+
+impl Plugin for DebugPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Update, (draw_reference_grid, draw_layout_graph));
+    }
+}
+=== FILE: ./debug/gizmos.rs ===
+use bevy::prelude::*;
+use crate::game::world::generation::layout::CaveLayout;
+
+pub fn draw_reference_grid(mut gizmos: Gizmos) {
+    // Ana Eksenler (X = Kırmızı, Y = Yeşil, Z = Mavi)
+    gizmos.line(Vec3::new(-100.0, 0.0, 0.0), Vec3::new(100.0, 0.0, 0.0), Color::srgb(1.0, 0.0, 0.0));
+    gizmos.line(Vec3::new(0.0, -100.0, 0.0), Vec3::new(0.0, 100.0, 0.0), Color::srgb(0.0, 1.0, 0.0));
+    gizmos.line(Vec3::new(0.0, 0.0, -100.0), Vec3::new(0.0, 0.0, 100.0), Color::srgb(0.0, 0.5, 1.0));
+
+    // Zemin Izgarası
+    let grid_size = 20;
+    let step = 5.0;
+    let grid_color = Color::srgba(0.5, 0.5, 0.5, 0.2);
+
+    for i in -grid_size..=grid_size {
+        if i == 0 {
+            continue;
+        }
+        let offset = i as f32 * step;
+
+        // X eksenine paralel çizgiler
+        gizmos.line(
+            Vec3::new(offset, 0.0, -grid_size as f32 * step),
+            Vec3::new(offset, 0.0, grid_size as f32 * step),
+            grid_color,
+        );
+
+        // Z eksenine paralel çizgiler
+        gizmos.line(
+            Vec3::new(-grid_size as f32 * step, 0.0, offset),
+            Vec3::new(grid_size as f32 * step, 0.0, offset),
+            grid_color,
+        );
+    }
+}
+
+pub fn draw_layout_graph(mut gizmos: Gizmos, layout_res: Option<Res<CaveLayout>>) {
+    if let Some(layout) = layout_res {
+        // YENİ: Odaları artık RoomData olarak alıyoruz ve gerçek yarıçaplarıyla (radius) çiziyoruz
+        for room in &layout.rooms {
+            gizmos.sphere(room.center, Quat::IDENTITY, room.radius, Color::srgb(0.0, 0.5, 1.0));
+        }
+
+        // YENİ: Koridorları CorridorData üzerinden odaların ID'lerine bakarak çiziyoruz
+        for corridor in &layout.corridors {
+            // corridor.from_room_id ve to_room_id değerlerine karşılık gelen odaları buluyoruz
+            let from_room = layout.rooms.iter().find(|r| r.id == corridor.from_room_id);
+            let to_room = layout.rooms.iter().find(|r| r.id == corridor.to_room_id);
+
+            if let (Some(from), Some(to)) = (from_room, to_room) {
+                gizmos.line(from.center, to.center, Color::srgb(1.0, 1.0, 0.0));
+            }
+        }
+    }
+}
+=== FILE: ./lib.rs ===
+pub mod camera;
+pub mod debug;
+pub mod generation;
+pub mod mesh;
+pub mod physics;
+=== FILE: ./generation/noise.rs ===
+/// 3D koordinatları karma (hash) işleminden geçirerek 0.0 ile 1.0 arası deterministik rastgele sayı üretir
+fn hash3(x: i32, y: i32, z: i32, seed: i32) -> f32 {
+    let mut h = seed.wrapping_add(x.wrapping_mul(374761393));
+    h = h.wrapping_add(y.wrapping_mul(668265263));
+    h = h.wrapping_add(z.wrapping_mul(786358481));
+    h ^= h >> 13;
+    h = h.wrapping_mul(236357905);
+    h ^= h >> 15;
+    
+    (h as u32 as f32) / (u32::MAX as f32)
+}
+
+/// Lineer interpolasyon
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + t * (b - a)
+}
+
+/// Kenar yumaşatıcı interpolasyon (Smootherstep)
+fn fade(t: f32) -> f32 {
+    t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+}
+
+/// 3 Boyutlu temel gürültü fonksiyonu
+pub fn value_noise_3d(x: f32, y: f32, z: f32, seed: i32) -> f32 {
+    let x0 = x.floor() as i32;
+    let y0 = y.floor() as i32;
+    let z0 = z.floor() as i32;
+
+    let x1 = x0.wrapping_add(1);
+    let y1 = y0.wrapping_add(1);
+    let z1 = z0.wrapping_add(1);
+
+    let u = fade(x - x.floor());
+    let v = fade(y - y.floor());
+    let w = fade(z - z.floor());
+
+    let c000 = hash3(x0, y0, z0, seed);
+    let c100 = hash3(x1, y0, z0, seed);
+    let c010 = hash3(x0, y1, z0, seed);
+    let c110 = hash3(x1, y1, z0, seed);
+    let c001 = hash3(x0, y0, z1, seed);
+    let c101 = hash3(x1, y0, z1, seed);
+    let c011 = hash3(x0, y1, z1, seed);
+    let c111 = hash3(x1, y1, z1, seed);
+
+    let nx00 = lerp(c000, c100, u);
+    let nx01 = lerp(c001, c101, u);
+    let nx10 = lerp(c010, c110, u);
+    let nx11 = lerp(c011, c111, u);
+
+    let nxy0 = lerp(nx00, nx10, v);
+    let nxy1 = lerp(nx01, nx11, v);
+
+    lerp(nxy0, nxy1, w)
+}
+
+/// Fractal Brownian Motion (FBM) ile katmanlı organik gürültü
+pub fn fbm_3d(x: f32, y: f32, z: f32, octaves: usize, seed: i32) -> f32 {
+    let mut total = 0.0;
+    let mut frequency = 1.0;
+    let mut amplitude = 1.0;
+    let mut max_value = 0.0;
+
+    for _ in 0..octaves {
+        total += value_noise_3d(x * frequency, y * frequency, z * frequency, seed) * amplitude;
+        max_value += amplitude;
+        amplitude *= 0.5;
+        frequency *= 2.0;
+    }
+
+    total / max_value
+}
+
+=== FILE: ./generation/sdf.rs ===
+use bevy::prelude::*;
+
+pub fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + t * (b - a)
+}
+
+pub fn smooth_min(a: f32, b: f32, k: f32) -> f32 {
+    let h = (0.5 + 0.5 * (b - a) / k).clamp(0.0, 1.0);
+    lerp(b, a, h) - k * h * (1.0 - h)
+}
+
+pub fn sdf_sphere(point: Vec3, center: Vec3, radius: f32) -> f32 {
+    point.distance(center) - radius
+}
+
+/// YENİ: İki nokta arasında uzanan Kapsül (Tünel) için SDF
+/// p: Uzaydaki geçerli nokta
+/// a: Tünelin başlangıç noktası
+/// b: Tünelin bitiş noktası
+/// r: Tünelin yarıçapı
+pub fn sdf_capsule(p: Vec3, a: Vec3, b: Vec3, r: f32) -> f32 {
+    let pa = p - a;
+    let ba = b - a;
+    
+    // Noktanın doğru parçası (A-B) üzerindeki izdüşüm oranını (0 ile 1 arası) buluyoruz
+    let h = (pa.dot(ba) / ba.dot(ba)).clamp(0.0, 1.0);
+    
+    // İzdüşüm noktasına olan mesafeden yarıçapı çıkarıyoruz
+    (pa - ba * h).length() - r
+}
+=== FILE: ./generation/mod.rs ===
+pub mod config;
+pub mod field;
+pub mod layout;
+pub mod noise;
+pub mod sdf;
+
+use bevy::prelude::*;
+use bevy::tasks::{AsyncComputeTaskPool, Task}; // YENİ: Asenkron görev kütüphaneleri
+use rand::Rng;
+
+use crate::game::world::generation::layout::test_camera_zone_system;
+use config::{ActiveCaveType, CaveGenerationConfig, CaveType};
+use field::{ChunkManager, ScalarField};
+use layout::{calculate_mst, CaveLayout, CorridorData, RoomData};
+use noise::fbm_3d;
+use sdf::{sdf_capsule, sdf_sphere, smooth_min};
+// Mesh üretim fonksiyonlarını arka planda çağırabilmek için import ediyoruz
+use crate::game::world::mesh::builder::build_mesh;
+use crate::game::world::mesh::marching_cubes::extract_surface;
+
+pub struct GenerationPlugin;
+
+impl Plugin for GenerationPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<CaveGenerationConfig>()
+            .insert_resource(ActiveCaveType(CaveType::Natural))
+            .add_systems(Startup, spawn_generation_tasks) // Fonksiyon adını değiştirdik
+            .add_systems(Update, test_camera_zone_system); // YENİ: Sistemi burada aktif ediyoruz
+    }
+}
+
+/// Arka plandan dönecek veriyi tutan yapı
+// ChunkResult yapısının içine surface_tags ekliyoruz
+pub struct ChunkResult {
+    pub coord: IVec3,
+    pub field: ScalarField,
+    pub mesh: Option<Mesh>,
+}
+
+/// Bevy'nin Entity'lerine takacağımız Görev Bileşeni
+#[derive(Component)]
+pub struct ChunkGenTask(pub Task<ChunkResult>);
+
+fn spawn_generation_tasks(
+    mut commands: Commands,
+    config: Res<CaveGenerationConfig>,
+    active_type: Res<ActiveCaveType>,
+) {
+    let current_config = match active_type.0 {
+        CaveType::Natural => &config.natural,
+        CaveType::Mine => &config.mine,
+        CaveType::LavaTube => &config.lava_tube,
+        CaveType::Ruin => &config.ruin,
+    };
+
+    let size = current_config.grid_size;
+    let offset = Vec3::new(
+        -(size.x as f32) / 2.0,
+        -(size.y as f32) / 2.0,
+        -(size.z as f32) / 2.0,
+    );
+    let step = 1.0;
+
+    let mut rng = rand::thread_rng();
+    let seed: i32 = rng.gen();
+
+    let mut rooms: Vec<Vec3> = Vec::new();
+    let target_room_count =
+        rng.gen_range(current_config.min_chambers..=current_config.max_chambers);
+    let mut room_radii: Vec<f32> = Vec::new();
+
+    for _ in 0..100 {
+        if rooms.len() >= target_room_count {
+            break;
+        }
+        let pos = Vec3::new(
+            rng.gen_range((offset.x + 10.0)..(offset.x + size.x as f32 - 10.0)),
+            rng.gen_range((offset.y + 10.0)..(offset.y + size.y as f32 - 10.0)),
+            rng.gen_range((offset.z + 10.0)..(offset.z + size.z as f32 - 10.0)),
+        );
+        if !rooms.iter().any(|&r| r.distance(pos) < 15.0) {
+            rooms.push(pos);
+            room_radii.push(
+                rng.gen_range(
+                    current_config.min_chamber_radius..=current_config.max_chamber_radius,
+                ),
+            );
+        }
+    }
+
+    let corridors = calculate_mst(&rooms);
+
+    // MST ile odalar arasındaki ham bağlantıları hesapla
+    let corridors_edges = calculate_mst(&rooms);
+    // YENİ: Verileri Zekileştiriyoruz
+    let mut room_data_list = Vec::new();
+    for (i, &center) in rooms.iter().enumerate() {
+        room_data_list.push(RoomData {
+            id: i,
+            center,
+            radius: room_radii[i],
+        });
+    }
+
+    let mut corridor_data_list = Vec::new();
+    for edge in &corridors_edges {
+        corridor_data_list.push(CorridorData {
+            from_room_id: edge.from,
+            to_room_id: edge.to,
+            radius: current_config.tunnel_radius,
+        });
+    }
+
+    commands.insert_resource(CaveLayout {
+        rooms: room_data_list,
+        corridors: corridor_data_list,
+    });
+
+    let chunk_logical_size = UVec3::new(32, 32, 32);
+    commands.insert_resource(ChunkManager::new(chunk_logical_size));
+
+    let chunks_x = (size.x as f32 / chunk_logical_size.x as f32).ceil() as i32;
+    let chunks_y = (size.y as f32 / chunk_logical_size.y as f32).ceil() as i32;
+    let chunks_z = (size.z as f32 / chunk_logical_size.z as f32).ceil() as i32;
+
+    // YENİ: Tüm Chunk koordinatlarını bir listeye topla
+    let mut chunk_list = Vec::new();
+    for cx in 0..chunks_x {
+        for cy in 0..chunks_y {
+            for cz in 0..chunks_z {
+                chunk_list.push(IVec3::new(cx, cy, cz));
+            }
+        }
+    }
+
+    // YENİ: Kameranın freecam.rs içindeki başlangıç noktası (0.0, 8.0, 15.0)
+    let camera_start_pos = Vec3::new(0.0, 8.0, 15.0);
+
+    // YENİ: Chunk'ları merkeze olan uzaklıklarına göre yakından uzağa doğru sırala
+    chunk_list.sort_by(|a, b| {
+        let pos_a = offset
+            + Vec3::new(
+                a.x as f32 * chunk_logical_size.x as f32,
+                a.y as f32 * chunk_logical_size.y as f32,
+                a.z as f32 * chunk_logical_size.z as f32,
+            );
+        let pos_b = offset
+            + Vec3::new(
+                b.x as f32 * chunk_logical_size.x as f32,
+                b.y as f32 * chunk_logical_size.y as f32,
+                b.z as f32 * chunk_logical_size.z as f32,
+            );
+        pos_a
+            .distance_squared(camera_start_pos)
+            .partial_cmp(&pos_b.distance_squared(camera_start_pos))
+            .unwrap()
+    });
+
+    let thread_pool = AsyncComputeTaskPool::get();
+
+    // YENİ: Sıralanmış liste üzerinden görevleri fırlat
+    for chunk_coord in chunk_list {
+        let chunk_world_offset = offset
+            + Vec3::new(
+                (chunk_coord.x as f32) * chunk_logical_size.x as f32,
+                (chunk_coord.y as f32) * chunk_logical_size.y as f32,
+                (chunk_coord.z as f32) * chunk_logical_size.z as f32,
+            );
+
+        let rooms_clone = rooms.clone();
+        let room_radii_clone = room_radii.clone();
+        let corridors_clone = corridors.clone();
+        let config_clone = current_config.clone();
+
+        let task = thread_pool.spawn(async move {
+            let mut field = ScalarField::new(chunk_coord, chunk_logical_size, chunk_world_offset);
+
+            // 1. SKALER ALAN HESAPLAMA (Arka planda)
+            for z in 0..field.padded_size.z {
+                for y in 0..field.padded_size.y {
+                    for x in 0..field.padded_size.x {
+                        let world_pos =
+                            field.world_origin + Vec3::new(x as f32, y as f32, z as f32) * step;
+                        let mut min_dist = f32::MAX;
+
+                        for (i, room) in rooms_clone.iter().enumerate() {
+                            let dist = sdf_sphere(world_pos, *room, room_radii_clone[i]);
+                            min_dist = smooth_min(min_dist, dist, 4.0);
+                        }
+                        for edge in &corridors_clone {
+                            let p_a = rooms_clone[edge.from];
+                            let p_b = rooms_clone[edge.to];
+                            let dist = sdf_capsule(world_pos, p_a, p_b, config_clone.tunnel_radius);
+                            min_dist = smooth_min(min_dist, dist, 4.0);
+                        }
+
+                        let nx = world_pos.x * config_clone.noise_scale;
+                        let ny = world_pos.y * config_clone.noise_scale;
+                        let nz = world_pos.z * config_clone.noise_scale;
+
+                        let noise_perturbation = (fbm_3d(nx, ny, nz, 4, seed) - 0.5) * 1.5;
+                        let final_density =
+                            0.35 + (min_dist * config_clone.floor_noise) + noise_perturbation;
+
+                        field.set_density(x, y, z, final_density);
+                    }
+                }
+            }
+
+            let surface = extract_surface(&field, 0.35, step);
+            let mesh = if !surface.vertices.is_empty() {
+                Some(build_mesh(surface))
+            } else {
+                None
+            };
+
+            ChunkResult {
+                coord: chunk_coord,
+                field,
+                mesh,
+            }
+        });
+
+        commands.spawn(ChunkGenTask(task));
+    }
+}
+
+=== FILE: ./generation/config.rs ===
+use bevy::prelude::*;
+
+#[derive(Reflect, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum CaveType {
+    #[default]
+    Natural,
+    Mine,
+    LavaTube,
+    Ruin,
+}
+
+/// Hangi mağara tipinin üretileceğini belirten aktif State/Resource
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct ActiveCaveType(pub CaveType);
+
+#[derive(Reflect, Clone, Debug)]
+pub struct CaveTypeConfig {
+    pub grid_size: UVec3, // Üretim ızgarasının boyutu
+    pub noise_scale: f32, // Gürültü (FBM) ölçeği
+    pub min_chambers: usize,
+    pub max_chambers: usize,
+    pub min_chamber_radius: f32,
+    pub max_chamber_radius: f32,
+    pub tunnel_radius: f32,
+    pub floor_noise: f32, // Zemin düzensizliği çarpanı
+    pub cave_count: u32,
+    pub min_depth: f32,
+    pub max_depth: f32,
+    pub min_tunnel_width: f32,
+    pub max_tunnel_width: f32,
+    pub min_height_variance: f32,
+    pub max_height_variance: f32,
+    pub entrance_count: usize,
+    pub ramp_length: i32,
+    pub light_color: Color,
+    pub light_intensity: f32,
+    pub light_range: f32,
+    pub wall_light_chance: f32,
+}
+
+#[derive(Resource, Reflect, Clone, Debug)]
+#[reflect(Resource)]
+pub struct CaveGenerationConfig {
+    pub natural: CaveTypeConfig,
+    pub mine: CaveTypeConfig,
+    pub lava_tube: CaveTypeConfig,
+    pub ruin: CaveTypeConfig,
+}
+
+impl Default for CaveGenerationConfig {
+    fn default() -> Self {
+        Self {
+            natural: CaveTypeConfig {
+                grid_size: UVec3::new(192, 64, 192),
+                noise_scale: 0.08,
+                tunnel_radius: 4.0,
+                cave_count: 2,
+                min_depth: 20.0,
+                max_depth: 35.0,
+                min_chambers: 20,
+                max_chambers: 30,
+                min_chamber_radius: 5.0,
+                max_chamber_radius: 10.0,
+                min_tunnel_width: 3.0,
+                max_tunnel_width: 5.0,
+                min_height_variance: -4.0,
+                max_height_variance: 2.0,
+                floor_noise: 0.1,
+                entrance_count: 1,
+                ramp_length: 15,
+                light_color: Color::srgb(1.0, 0.6, 0.3),
+                light_intensity: 1500.0,
+                light_range: 12.0,
+                wall_light_chance: 0.20,
+            },
+            mine: CaveTypeConfig {
+                grid_size: UVec3::new(48, 24, 48), // Madenler daha dar bir alana sıkışmış
+                noise_scale: 0.04, // Daha düz, kazılmış duvarlar
+                tunnel_radius: 3.0,
+                cave_count: 1,
+                min_depth: 15.0,
+                max_depth: 25.0,
+                min_chambers: 6,
+                max_chambers: 12,
+                min_chamber_radius: 4.0,
+                max_chamber_radius: 7.0,
+                min_tunnel_width: 2.0,
+                max_tunnel_width: 3.0,
+                min_height_variance: -1.0,
+                max_height_variance: 1.0,
+                floor_noise: 0.1,
+                entrance_count: 2,
+                ramp_length: 10,
+                light_color: Color::srgb(0.9, 0.7, 0.2),
+                light_intensity: 2000.0,
+                light_range: 10.0,
+                wall_light_chance: 0.20,
+            },
+            lava_tube: CaveTypeConfig {
+                grid_size: UVec3::new(80, 40, 80), // Devasa ve geniş alanlar
+                noise_scale: 0.1, // Daha organik ve akışkan
+                tunnel_radius: 8.0,
+                cave_count: 0,
+                min_depth: 40.0,
+                max_depth: 60.0,
+                min_chambers: 3,
+                max_chambers: 5,
+                min_chamber_radius: 8.0,
+                max_chamber_radius: 15.0,
+                min_tunnel_width: 6.0,
+                max_tunnel_width: 10.0,
+                min_height_variance: -5.0,
+                max_height_variance: -1.0,
+                floor_noise: 0.3,
+                entrance_count: 1,
+                ramp_length: 20,
+                light_color: Color::srgb(1.0, 0.2, 0.0),
+                light_intensity: 3000.0,
+                light_range: 20.0,
+                wall_light_chance: 0.20,
+            },
+            ruin: CaveTypeConfig {
+                grid_size: UVec3::new(50, 20, 50),
+                noise_scale: 0.02, // Neredeyse tamamen geometrik/yapay
+                tunnel_radius: 4.0,
+                cave_count: 1,
+                min_depth: 10.0,
+                max_depth: 15.0,
+                min_chambers: 3,
+                max_chambers: 6,
+                min_chamber_radius: 6.0,
+                max_chamber_radius: 9.0,
+                min_tunnel_width: 4.0,
+                max_tunnel_width: 4.0,
+                min_height_variance: 0.0,
+                max_height_variance: 0.0,
+                floor_noise: 0.05,
+                entrance_count: 1,
+                ramp_length: 8,
+                light_color: Color::srgb(0.2, 0.6, 1.0),
+                light_intensity: 2500.0,
+                light_range: 15.0,
+                wall_light_chance: 0.20,
+            },
+        }
+    }
+}
+
+=== FILE: ./generation/layout.rs ===
+use bevy::prelude::*;
+//use crate::game::world::generation::layout::{CaveLayout, ZoneType};
+
+pub fn test_camera_zone_system(
+    q_camera: Query<&Transform, With<Camera>>,
+    layout_res: Option<Res<CaveLayout>>,
+) {
+    let Some(layout) = layout_res else { return; };
+    let Ok(camera_transform) = q_camera.get_single() else { return; };
+    
+    let current_pos = camera_transform.translation;
+    let zone = layout.get_zone_at(current_pos);
+
+    match zone {
+        ZoneType::Room(id) => {
+            info!("[Zoning Test] Şu an {} Nolu Odanın içindesiniz!", id);
+        }
+        ZoneType::Corridor(from, to) => {
+            info!("[Zoning Test] Şu an Oda {} ile Oda {} arasındaki Koridordesiniz!", from, to);
+        }
+        ZoneType::Wilderness => {
+            // Duvar içi veya dışarıda
+            // info!("[Zoning Test] Mağara dışındasınız/duvardasınız.");
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Edge {
+    pub from: usize,
+    pub to: usize,
+    pub distance: f32,
+}
+
+
+#[derive(Clone, Copy, Debug)]
+pub struct RoomData {
+    pub id: usize,
+    pub center: Vec3,
+    pub radius: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CorridorData {
+    pub from_room_id: usize,
+    pub to_room_id: usize,
+    pub radius: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ZoneType {
+    Room(usize),     // Odanın ID'sini tutar
+    Corridor(usize, usize), // Bağladığı odaların ID'lerini tutar
+    Wilderness,      // Mağaranın içi olmayan, duvar içi veya dış uzay
+}
+
+#[derive(Resource)]
+pub struct CaveLayout {
+    pub rooms: Vec<RoomData>,
+    pub corridors: Vec<CorridorData>,
+}
+
+impl CaveLayout {
+    /// Verilen 3D dünya koordinatının hangi bölgenin sınırları içinde olduğunu hesaplar
+    pub fn get_zone_at(&self, point: Vec3) -> ZoneType {
+        // 1. Önce odaları kontrol et (Nokta, oda merkezine yarıçapından yakın mı?)
+        for room in &self.rooms {
+            if point.distance_squared(room.center) <= (room.radius * room.radius) {
+                return ZoneType::Room(room.id);
+            }
+        }
+
+        // 2. Eğer odada değilse, koridorları kontrol et (Kapsül içi mesafe ölçümü)
+        for corridor in &self.corridors {
+            let p_a = self.rooms[corridor.from_room_id].center;
+            let p_b = self.rooms[corridor.to_room_id].center;
+            
+            // sdf_capsule mantığının basitleştirilmiş hali
+            let pa = point - p_a;
+            let ba = p_b - p_a;
+            let h = (pa.dot(ba) / ba.dot(ba)).clamp(0.0, 1.0);
+            let closest_point = p_a + ba * h;
+            
+            if point.distance_squared(closest_point) <= (corridor.radius * corridor.radius) {
+                return ZoneType::Corridor(corridor.from_room_id, corridor.to_room_id);
+            }
+        }
+
+        // Nokta ne bir odada ne de koridorda (Örn: Duvarın içinde veya mağara dışı)
+        ZoneType::Wilderness
+    }
+}
+
+
+/// Döngüleri (Loop) engellemek için Disjoint-Set (Union-Find) Veri Yapısı
+struct UnionFind {
+    parent: Vec<usize>,
+}
+
+impl UnionFind {
+    fn new(size: usize) -> Self {
+        Self {
+            parent: (0..size).collect(),
+        }
+    }
+
+    fn find(&mut self, i: usize) -> usize {
+        if self.parent[i] == i {
+            i
+        } else {
+            let root = self.find(self.parent[i]);
+            self.parent[i] = root; // Yol sıkıştırma (Path compression) optimizasyonu
+            root
+        }
+    }
+
+    fn union(&mut self, i: usize, j: usize) -> bool {
+        let root_i = self.find(i);
+        let root_j = self.find(j);
+        
+        if root_i != root_j {
+            self.parent[root_i] = root_j; // Ağaçları birleştir
+            true
+        } else {
+            false // Zaten aynı ağaçtalar (Döngü oluşurdu)
+        }
+    }
+}
+
+/// Odalar arasındaki en kısa ve kesintisiz ana yolu (Minimum Spanning Tree) hesaplar
+pub fn calculate_mst(rooms: &[Vec3]) -> Vec<Edge> {
+    let mut edges = Vec::new();
+    let num_rooms = rooms.len();
+
+    // 1. Tüm odalar arasındaki olası bağlantıları (Tam Graf - Complete Graph) oluştur
+    for i in 0..num_rooms {
+        for j in (i + 1)..num_rooms {
+            let dist = rooms[i].distance(rooms[j]);
+            edges.push(Edge { from: i, to: j, distance: dist });
+        }
+    }
+
+    // 2. Mesafeye göre küçükten büyüğe sırala (Kruskal Algoritması kuralı)
+    edges.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap());
+
+    // 3. MST Hesapla
+    let mut mst = Vec::new();
+    let mut uf = UnionFind::new(num_rooms);
+
+    for edge in edges {
+        // Eğer bu iki odayı bağlamak bir kısır döngü (loop) yaratmıyorsa ekle
+        if uf.union(edge.from, edge.to) {
+            mst.push(edge);
+            // Bir ağaçta (N-1) adet kenar bulunur, ulaştıysak hesaplamayı bitir.
+            if mst.len() == num_rooms - 1 {
+                break;
+            }
+        }
+    }
+
+    mst
+}
+
+=== FILE: ./generation/field.rs ===
+use bevy::prelude::*;
+use bevy::utils::HashMap;
+
+#[derive(Resource, Clone)]
+pub struct ChunkManager {
+    pub chunks: HashMap<IVec3, ScalarField>,
+    pub chunk_size: UVec3,
+}
+
+impl ChunkManager {
+    pub fn new(chunk_size: UVec3) -> Self {
+        Self {
+            chunks: HashMap::new(),
+            chunk_size,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct ScalarField {
+    pub chunk_coord: IVec3,
+    pub logical_size: UVec3,
+    pub padded_size: UVec3,
+    pub data: Vec<f32>,
+    pub world_origin: Vec3,
+}
+
+impl ScalarField {
+    pub fn new(chunk_coord: IVec3, logical_size: UVec3, world_origin: Vec3) -> Self {
+        let padded_size = UVec3::new(logical_size.x + 1, logical_size.y + 1, logical_size.z + 1);
+        Self {
+            chunk_coord,
+            logical_size,
+            padded_size,
+            data: vec![0.0; (padded_size.x * padded_size.y * padded_size.z) as usize],
+            world_origin,
+        }
+    }
+
+    pub fn get_index(&self, x: u32, y: u32, z: u32) -> usize {
+        (z * self.padded_size.x * self.padded_size.y + y * self.padded_size.x + x) as usize
+    }
+
+    pub fn get_density(&self, x: u32, y: u32, z: u32) -> f32 {
+        if x >= self.padded_size.x || y >= self.padded_size.y || z >= self.padded_size.z {
+            return 0.0;
+        }
+        self.data[self.get_index(x, y, z)]
+    }
+
+    pub fn set_density(&mut self, x: u32, y: u32, z: u32, value: f32) {
+        if x < self.padded_size.x && y < self.padded_size.y && z < self.padded_size.z {
+            let idx = self.get_index(x, y, z);
+            self.data[idx] = value;
+        }
+    }
+}
+=== FILE: ./main.rs ===
+
+
+use bevy::prelude::*;
+use bevy_rapier3d::prelude::*;
+use benim_oyun::camera::CameraPlugin;
+use benim_oyun::debug::DebugPlugin;
+use benim_oyun::generation::GenerationPlugin;
+use benim_oyun::mesh::MeshGenPlugin; 
+use benim_oyun::physics::PhysicsPlugin;
+
+
+
+fn main() {
+    App::new()
+        .add_plugins(DefaultPlugins.set(WindowPlugin {
+            primary_window: Some(Window {
+                title: "Cave Lab - Sprint 4: Bevy Mesh".into(),
+                resolution: (1280.0, 720.0).into(),
+                ..default()
+            }),
+            ..default()
+        }))
+        .add_plugins(RapierPhysicsPlugin::<NoUserData>::default())
+        
+        .add_plugins(CameraPlugin)
+        .add_plugins(DebugPlugin)
+        .add_plugins(GenerationPlugin)
+        .add_plugins(MeshGenPlugin) // SİSTEMİ BURADA UYANDIRIYORUZ
+        .add_plugins(PhysicsPlugin)
+        
+        .add_systems(Startup, setup_light)
+        .run();
+}
+
+fn setup_light(mut commands: Commands) {
+    // 1. Mağaranın içinin zifiri karanlık olmasını engelleyen ortam ışığı
+    commands.insert_resource(AmbientLight {
+        color: Color::WHITE,
+        brightness: 150.0,
+    });
+
+    // 2. Dışarıdan vuran güneş/ay ışığı (Gölgeler için)
+    commands.spawn(DirectionalLightBundle {
+        directional_light: DirectionalLight {
+            illuminance: 15000.0,
+            shadows_enabled: true,
+            ..default()
+        },
+        transform: Transform::from_xyz(50.0, 50.0, 50.0).looking_at(Vec3::ZERO, Vec3::Y),
+        ..default()
+    });
+}
+
+=== FILE: ./mesh/mod.rs ===
+pub mod builder;
+pub mod marching_cubes;
+pub mod material;
+pub mod tables;
+
+use bevy::prelude::*;
+use bevy::render::texture::{
+    ImageAddressMode, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor,
+};
+use bevy_rapier3d::prelude::*;
+use futures_lite::future;
+
+use crate::game::world::generation::config::ActiveCaveType;
+use crate::game::world::generation::config::CaveGenerationConfig;
+use crate::game::world::generation::config::CaveType;
+use crate::game::world::generation::field::ChunkManager;
+use crate::game::world::generation::field::ScalarField;
+use crate::game::world::generation::layout::CaveLayout;
+use crate::game::world::generation::{ChunkGenTask, ChunkResult};
+use crate::game::world::mesh::builder::build_mesh;
+use crate::game::world::mesh::marching_cubes::extract_surface;
+use material::TriplanarMaterial;
+
+#[derive(Component)]
+pub struct CaveChunk(pub IVec3);
+
+#[derive(Resource)]
+pub struct CaveMaterialCache(pub Handle<TriplanarMaterial>);
+
+pub struct MeshGenPlugin;
+
+impl Plugin for MeshGenPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_plugins(MaterialPlugin::<TriplanarMaterial>::default())
+            .add_systems(Startup, setup_material)
+            .add_systems(
+                Update,
+                (
+                    poll_chunk_tasks,
+                    stream_chunks_around_camera,
+                    despawn_distant_chunks,
+                ),
+            );
+    }
+}
+
+fn stream_chunks_around_camera(
+    mut commands: Commands,
+    q_camera: Query<&Transform, With<Camera>>,
+    chunk_manager: Res<ChunkManager>,
+    config: Res<CaveGenerationConfig>,
+    active_type: Res<ActiveCaveType>,
+    layout_res: Option<Res<CaveLayout>>,
+) {
+    let Ok(camera_transform) = q_camera.get_single() else {
+        return;
+    };
+    let camera_pos = camera_transform.translation;
+    let Some(layout) = layout_res else {
+        return;
+    };
+
+    let current_config = match active_type.0 {
+        CaveType::Natural => &config.natural,
+        CaveType::Mine => &config.mine,
+        CaveType::LavaTube => &config.lava_tube,
+        CaveType::Ruin => &config.ruin,
+    };
+
+    let chunk_size = chunk_manager.chunk_size;
+    let size = current_config.grid_size;
+    let offset = Vec3::new(
+        -(size.x as f32) / 2.0,
+        -(size.y as f32) / 2.0,
+        -(size.z as f32) / 2.0,
+    );
+
+    let load_radius = 80.0;
+    let load_radius_sq = load_radius * load_radius;
+
+    let chunks_x = (size.x as f32 / chunk_size.x as f32).ceil() as i32;
+    let chunks_y = (size.y as f32 / chunk_size.y as f32).ceil() as i32;
+    let chunks_z = (size.z as f32 / chunk_size.z as f32).ceil() as i32;
+
+    let thread_pool = bevy::tasks::AsyncComputeTaskPool::get();
+
+    for cx in 0..chunks_x {
+        for cy in 0..chunks_y {
+            for cz in 0..chunks_z {
+                let coord = IVec3::new(cx, cy, cz);
+                let chunk_world_offset = offset
+                    + Vec3::new(
+                        (cx as f32) * chunk_size.x as f32,
+                        (cy as f32) * chunk_size.y as f32,
+                        (cz as f32) * chunk_size.z as f32,
+                    );
+
+                let chunk_center = chunk_world_offset
+                    + Vec3::new(
+                        chunk_size.x as f32 / 2.0,
+                        chunk_size.y as f32 / 2.0,
+                        chunk_size.z as f32 / 2.0,
+                    );
+
+                if chunk_center.distance_squared(camera_pos) <= load_radius_sq {
+                    if !chunk_manager.chunks.contains_key(&coord) {
+                        let rooms_clone = layout.rooms.clone();
+                        let corridors_clone = layout.corridors.clone();
+                        let config_clone = current_config.clone();
+                        let chunk_logical_size = chunk_size;
+                        let seed = 4251;
+
+                        let task = thread_pool.spawn(async move {
+                            let mut field =
+                                ScalarField::new(coord, chunk_logical_size, chunk_world_offset);
+
+                            for z in 0..field.padded_size.z {
+                                for y in 0..field.padded_size.y {
+                                    for x in 0..field.padded_size.x {
+                                        let world_pos = field.world_origin
+                                            + Vec3::new(x as f32, y as f32, z as f32);
+                                        let mut min_dist = f32::MAX;
+
+                                        // Not: Önceki sprintteki config verilerine göre uyarlanmıştır. Eğer SDF odalar vs.
+                                        // farklı id parametrelerine sahipse oraları kendi mantığına göre revize edebilirsin.
+                                        for room in &rooms_clone {
+                                            let dist = crate::game::world::generation::sdf::sdf_sphere(
+                                                world_pos,
+                                                room.center,
+                                                room.radius,
+                                            );
+                                            min_dist = crate::game::world::generation::sdf::smooth_min(
+                                                min_dist, dist, 4.0,
+                                            );
+                                        }
+
+                                        let nx = world_pos.x * config_clone.noise_scale;
+                                        let ny = world_pos.y * config_clone.noise_scale;
+                                        let nz = world_pos.z * config_clone.noise_scale;
+
+                                        let noise_perturbation =
+                                            (crate::game::world::generation::noise::fbm_3d(nx, ny, nz, 4, seed)
+                                                - 0.5)
+                                                * 1.5;
+                                        let final_density = 0.35
+                                            + (min_dist * config_clone.floor_noise)
+                                            + noise_perturbation;
+
+                                        field.set_density(x, y, z, final_density);
+                                    }
+                                }
+                            }
+
+                            let surface = extract_surface(&field, 0.35, 1.0);
+
+                            // AnalyzedSurface kaldırıldı, doğrudan Mesh dönüyor
+                            let mesh = if !surface.vertices.is_empty() {
+                                Some(build_mesh(surface))
+                            } else {
+                                None
+                            };
+
+                            ChunkResult { coord, field, mesh }
+                        });
+
+                        commands.spawn(ChunkGenTask(task));
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn setup_material(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    mut materials: ResMut<Assets<TriplanarMaterial>>,
+) {
+    let sampler_settings = |settings: &mut ImageLoaderSettings| {
+        settings.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+            address_mode_u: ImageAddressMode::Repeat,
+            address_mode_v: ImageAddressMode::Repeat,
+            address_mode_w: ImageAddressMode::Repeat,
+            ..default()
+        });
+    };
+
+    let wall_tex: Handle<Image> =
+        asset_server.load_with_settings("textures/cave_wall.png", sampler_settings);
+    let floor_tex: Handle<Image> =
+        asset_server.load_with_settings("textures/cave_floor.png", sampler_settings);
+    let ceiling_tex: Handle<Image> =
+        asset_server.load_with_settings("textures/cave_ceiling.png", sampler_settings);
+
+    let material = TriplanarMaterial {
+        wall_texture: wall_tex,
+        floor_texture: floor_tex,
+        ceiling_texture: ceiling_tex,
+    };
+
+    // HATA BURADAYDI: İkinci kez TriplanarMaterial yaratmaya çalışılıyordu[cite: 2].
+    // Sadece oluşturduğumuz materyali ekliyoruz.
+    let mat_handle = materials.add(material);
+
+    commands.insert_resource(CaveMaterialCache(mat_handle));
+}
+
+fn poll_chunk_tasks(
+    mut commands: Commands,
+    mut task_query: Query<(Entity, &mut ChunkGenTask)>,
+    mut chunk_manager: ResMut<ChunkManager>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    material_cache: Res<CaveMaterialCache>,
+) {
+    for (entity, mut task) in task_query.iter_mut() {
+        if let Some(result) = future::block_on(future::poll_once(&mut task.0)) {
+            let ChunkResult { coord, field, mesh } = result;
+
+            chunk_manager.chunks.insert(coord, field);
+
+            if let Some(cave_mesh) = mesh {
+                let collider =
+                    Collider::from_bevy_mesh(&cave_mesh, &ComputedColliderShape::TriMesh)
+                        .expect("Mesh'ten collider uretilemedi!");
+
+                commands.spawn((
+                    MaterialMeshBundle {
+                        mesh: meshes.add(cave_mesh),
+                        material: material_cache.0.clone(),
+                        transform: Transform::IDENTITY,
+                        ..default()
+                    },
+                    RigidBody::Fixed,
+                    collider,
+                    CaveChunk(coord),
+                ));
+            }
+
+            commands.entity(entity).despawn();
+        }
+    }
+}
+
+fn despawn_distant_chunks(
+    mut commands: Commands,
+    q_camera: Query<&Transform, With<Camera>>,
+    q_chunks: Query<(Entity, &CaveChunk)>,
+    mut chunk_manager: ResMut<ChunkManager>,
+) {
+    let Ok(camera_transform) = q_camera.get_single() else {
+        return;
+    };
+    let camera_pos = camera_transform.translation;
+
+    let unload_distance_sq = 150.0 * 150.0;
+
+    for (entity, chunk_comp) in q_chunks.iter() {
+        let coord = chunk_comp.0;
+
+        if let Some(field) = chunk_manager.chunks.get(&coord) {
+            let chunk_center = field.world_origin
+                + Vec3::new(
+                    field.logical_size.x as f32 / 2.0,
+                    field.logical_size.y as f32 / 2.0,
+                    field.logical_size.z as f32 / 2.0,
+                );
+
+            if chunk_center.distance_squared(camera_pos) > unload_distance_sq {
+                commands.entity(entity).despawn_recursive();
+                chunk_manager.chunks.remove(&coord);
+            }
+        }
+    }
+}
+
+=== FILE: ./mesh/marching_cubes.rs ===
+use bevy::prelude::*;
+use crate::game::world::generation::field::ScalarField;
+use super::tables::{EDGE_TABLE, TRI_TABLE};
+
+pub struct SurfaceData {
+    pub vertices: Vec<Vec3>,
+}
+
+/// İki nokta arasındaki yoğunluk farkına bakarak, yüzeyin kenarı tam olarak nerede kestiğini hesaplar.
+/// Organik görünümü sağlayan formül burasıdır.
+fn interpolate_vertex(isolevel: f32, p1: Vec3, p2: Vec3, val_p1: f32, val_p2: f32) -> Vec3 {
+    if (isolevel - val_p1).abs() < 0.00001 { return p1; }
+    if (isolevel - val_p2).abs() < 0.00001 { return p2; }
+    if (val_p1 - val_p2).abs() < 0.00001 { return p1; }
+
+    let t = (isolevel - val_p1) / (val_p2 - val_p1);
+    p1 + (p2 - p1) * t
+}
+
+pub fn extract_surface(field: &ScalarField, isolevel: f32, step: f32) -> SurfaceData {
+    let mut vertices = Vec::new();
+
+    // field.size yerine field.logical_size kullanıyoruz.
+    // +1 Overlap verisi sadece komşuyu okumak için kullanılır, yüzey üretmek için değil.
+    for z in 0..field.logical_size.z {
+        for y in 0..field.logical_size.y {
+            for x in 0..field.logical_size.x {
+                
+                let mut corners = [Vec3::ZERO; 8];
+                let mut values = [0.0; 8];
+
+                let corner_offsets = [
+                    UVec3::new(0, 0, 0), UVec3::new(1, 0, 0), UVec3::new(1, 0, 1), UVec3::new(0, 0, 1),
+                    UVec3::new(0, 1, 0), UVec3::new(1, 1, 0), UVec3::new(1, 1, 1), UVec3::new(0, 1, 1),
+                ];
+
+                for i in 0..8 {
+                    let offset = corner_offsets[i];
+                    let cx = x + offset.x;
+                    let cy = y + offset.y;
+                    let cz = z + offset.z;
+                    
+                    values[i] = field.get_density(cx, cy, cz);
+                    // field.chunk_offset yerine field.world_origin kullanıyoruz
+                    corners[i] = field.world_origin + Vec3::new(cx as f32, cy as f32, cz as f32) * step;
+                }
+
+                // ... (Aşağıdaki küp bitmask ve üçgen çıkarma kodları tamamen aynı kalacak)
+                let mut cube_index = 0;
+                if values[0] < isolevel { cube_index |= 1; }
+                if values[1] < isolevel { cube_index |= 2; }
+                if values[2] < isolevel { cube_index |= 4; }
+                if values[3] < isolevel { cube_index |= 8; }
+                if values[4] < isolevel { cube_index |= 16; }
+                if values[5] < isolevel { cube_index |= 32; }
+                if values[6] < isolevel { cube_index |= 64; }
+                if values[7] < isolevel { cube_index |= 128; }
+
+                if EDGE_TABLE[cube_index] == 0 {
+                    continue;
+                }
+
+                let mut vert_list = [Vec3::ZERO; 12];
+                let edges = EDGE_TABLE[cube_index];
+
+                if (edges & 1) != 0 { vert_list[0] = interpolate_vertex(isolevel, corners[0], corners[1], values[0], values[1]); }
+                if (edges & 2) != 0 { vert_list[1] = interpolate_vertex(isolevel, corners[1], corners[2], values[1], values[2]); }
+                if (edges & 4) != 0 { vert_list[2] = interpolate_vertex(isolevel, corners[2], corners[3], values[2], values[3]); }
+                if (edges & 8) != 0 { vert_list[3] = interpolate_vertex(isolevel, corners[3], corners[0], values[3], values[0]); }
+                if (edges & 16) != 0 { vert_list[4] = interpolate_vertex(isolevel, corners[4], corners[5], values[4], values[5]); }
+                if (edges & 32) != 0 { vert_list[5] = interpolate_vertex(isolevel, corners[5], corners[6], values[5], values[6]); }
+                if (edges & 64) != 0 { vert_list[6] = interpolate_vertex(isolevel, corners[6], corners[7], values[6], values[7]); }
+                if (edges & 128) != 0 { vert_list[7] = interpolate_vertex(isolevel, corners[7], corners[4], values[7], values[4]); }
+                if (edges & 256) != 0 { vert_list[8] = interpolate_vertex(isolevel, corners[0], corners[4], values[0], values[4]); }
+                if (edges & 512) != 0 { vert_list[9] = interpolate_vertex(isolevel, corners[1], corners[5], values[1], values[5]); }
+                if (edges & 1024) != 0 { vert_list[10] = interpolate_vertex(isolevel, corners[2], corners[6], values[2], values[6]); }
+                if (edges & 2048) != 0 { vert_list[11] = interpolate_vertex(isolevel, corners[3], corners[7], values[3], values[7]); }
+
+                for i in (0..16).step_by(3) {
+                    if TRI_TABLE[cube_index][i] == -1 { break; }
+                    vertices.push(vert_list[TRI_TABLE[cube_index][i] as usize]);
+                    vertices.push(vert_list[TRI_TABLE[cube_index][i + 1] as usize]);
+                    vertices.push(vert_list[TRI_TABLE[cube_index][i + 2] as usize]);
+                }
+            }
+        }
+    }
+
+    SurfaceData { vertices }
+}
+
+=== FILE: ./mesh/builder.rs ===
+use bevy::prelude::*;
+use bevy::render::mesh::{Indices, PrimitiveTopology};
+use bevy::render::render_asset::RenderAssetUsages;
+use std::collections::HashMap;
+use crate::game::world::mesh::marching_cubes::SurfaceData;
+
+
+// SurfaceType sınıflandırması için enum
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SurfaceType {
+    Floor,   // Zemin (Yürünebilir)
+    Ceiling, // Tavan
+    Wall,    // Duvar
+}
+
+pub struct AnalyzedSurface {
+    pub mesh: Mesh,
+}
+
+// 2. build_mesh fonksiyonunun imzasını ve içeriğini güncelliyoruz
+pub fn build_mesh(surface: SurfaceData) -> Mesh {
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+    let mut normals: Vec<Vec3> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+
+    let quantize = |v: Vec3| -> [i32; 3] {
+        [
+            (v.x * 1000.0).round() as i32,
+            (v.y * 1000.0).round() as i32,
+            (v.z * 1000.0).round() as i32,
+        ]
+    };
+
+    let mut vertex_map: HashMap<[i32; 3], u32> = HashMap::new();
+
+    for pos in surface.vertices.into_iter() {
+        let q_pos = quantize(pos);
+        let index = *vertex_map.entry(q_pos).or_insert_with(|| {
+            let idx = positions.len() as u32;
+            positions.push(pos.into());
+            normals.push(Vec3::ZERO);
+            idx
+        });
+        indices.push(index);
+    }
+
+    // --- BURASI DÖNGÜNÜN GÜNCELLENECEĞİ YER ---
+    let mut surface_tags: Vec<SurfaceType> = Vec::with_capacity(indices.len() / 3);
+
+    for i in (0..indices.len()).step_by(3) {
+        let i0 = indices[i] as usize;
+        let i1 = indices[i + 1] as usize;
+        let i2 = indices[i + 2] as usize;
+
+        let v0 = Vec3::from(positions[i0]);
+        let v1 = Vec3::from(positions[i1]);
+        let v2 = Vec3::from(positions[i2]);
+
+        let face_normal = (v1 - v0).cross(v2 - v0).normalize_or_zero();
+        
+        // Normalin Y ekseni ile yaptığı açıya göre sınıflandırma
+        let tag = if face_normal.y > 0.65 {
+            SurfaceType::Floor
+        } else if face_normal.y < -0.65 {
+            SurfaceType::Ceiling
+        } else {
+            SurfaceType::Wall
+        };
+
+        surface_tags.push(tag);
+
+        normals[i0] += face_normal;
+        normals[i1] += face_normal;
+        normals[i2] += face_normal;
+    }
+    // ------------------------------------------
+
+    let final_normals: Vec<[f32; 3]> = normals
+        .into_iter()
+        .map(|n| n.normalize_or_zero().into())
+        .collect();
+
+    let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(positions.len());
+    let texture_scale = 0.25;
+
+    for i in 0..positions.len() {
+        let p = Vec3::from(positions[i]);
+        let n = Vec3::from(final_normals[i]).abs();
+        
+        let uv = if n.x > n.y && n.x > n.z {
+            [p.z * texture_scale, p.y * texture_scale]
+        } else if n.y > n.x && n.y > n.z {
+            [p.x * texture_scale, p.z * texture_scale]
+        } else {
+            [p.x * texture_scale, p.y * texture_scale]
+        };
+        uvs.push(uv);
+    }
+
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, final_normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh.insert_indices(Indices::U32(indices));
+    mesh.generate_tangents().expect("Tangent uretilemedi!");
+
+    mesh
+}
+=== FILE: ./mesh/material.rs ===
+use bevy::prelude::*;
+use bevy::pbr::{MaterialPipeline, MaterialPipelineKey};
+use bevy::render::mesh::MeshVertexBufferLayoutRef;
+use bevy::render::render_resource::{
+    AsBindGroup, RenderPipelineDescriptor, ShaderRef, SpecializedMeshPipelineError,
+};
+
+#[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
+pub struct TriplanarMaterial {
+    #[texture(0)]
+    #[sampler(1)]
+    pub wall_texture: Handle<Image>,
+
+    #[texture(2)]
+    #[sampler(3)]
+    pub floor_texture: Handle<Image>,
+
+    #[texture(4)]
+    #[sampler(5)]
+    pub ceiling_texture: Handle<Image>,
+}
+
+impl Material for TriplanarMaterial {
+    fn fragment_shader() -> ShaderRef {
+        "shaders/triplanar.wgsl".into()
+    }
+
+    // YENİ EKLENEN KISIM:
+    // Render Pipeline oluşturulurken araya girip, culling ayarını None (Kapalı) yapıyoruz.
+    fn specialize(
+        _pipeline: &MaterialPipeline<Self>,
+        descriptor: &mut RenderPipelineDescriptor,
+        _layout: &MeshVertexBufferLayoutRef,
+        _key: MaterialPipelineKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        descriptor.primitive.cull_mode = None;
+        Ok(())
+    }
+}
+=== FILE: ./mesh/tables.rs ===
+pub const EDGE_TABLE: [u16; 256] = [
+//burada edge table var
+];
+
+
+pub const TRI_TABLE: [[i32; 16]; 256] = 
+[
+//burada tri table var
+];
+
+=== FILE: ./sockets/types.rs ===
+use bevy::prelude::*;
+
+#[derive(Component, Debug, Clone, Copy)]
+pub enum SocketType {
+    Spawn, // Oyuncu başlangıç noktası
+    Loot,  // Sandık/Eşya
+    Enemy, // Düşman
+    Trap,  // Tuzak
+}
+
+#[derive(Component)]
+pub struct CaveSocket {
+    pub socket_type: SocketType,
+    pub radius: f32, // Soketin kapladığı alan
+}
+
+=== FILE: ./game/world/proc_gen/generators/cave/config.rs ===
+use bevy::prelude::*;
+
+#[derive(Reflect, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum CaveType {
+    #[default]
+    Natural,
+    Mine,
+    LavaTube,
+    Ruin,
+}
+
+#[derive(Reflect, Clone, Debug)]
+pub struct CaveTypeConfig {
+    pub cave_count: u32,
+    pub min_depth: f32,
+    pub max_depth: f32,
+    pub min_chambers: usize,
+    pub max_chambers: usize,
+    pub min_chamber_radius: f32,
+    pub max_chamber_radius: f32,
+    pub min_tunnel_width: f32,
+    pub max_tunnel_width: f32,
+    pub min_height_variance: f32,
+    pub max_height_variance: f32,
+    pub floor_noise: f32,
+    pub entrance_count: usize,
+    pub ramp_length: i32,
+    pub light_color: Color,
+    pub light_intensity: f32,
+    pub light_range: f32,
+    pub wall_light_chance: f32,
+}
+
+#[derive(Resource, Reflect, Clone, Debug)]
+#[reflect(Resource)]
+pub struct CaveGenerationConfig {
+    pub natural: CaveTypeConfig,
+    pub mine: CaveTypeConfig,
+    pub lava_tube: CaveTypeConfig,
+    pub ruin: CaveTypeConfig,
+}
+
+impl Default for CaveGenerationConfig {
+    fn default() -> Self {
+        Self {
+            natural: CaveTypeConfig {
+                cave_count: 2,
+                min_depth: 20.0,
+                max_depth: 35.0,
+                min_chambers: 4,
+                max_chambers: 8,
+                min_chamber_radius: 5.0,
+                max_chamber_radius: 10.0,
+                min_tunnel_width: 3.0,
+                max_tunnel_width: 5.0,
+                min_height_variance: -4.0,
+                max_height_variance: 2.0,
+                floor_noise: 0.4,
+                entrance_count: 1,
+                ramp_length: 15,
+                light_color: Color::srgb(1.0, 0.6, 0.3),
+                light_intensity: 1500.0,
+                light_range: 12.0,
+                wall_light_chance: 0.20,
+            },
+            mine: CaveTypeConfig {
+                cave_count: 1,
+                min_depth: 15.0,
+                max_depth: 25.0,
+                min_chambers: 6,
+                max_chambers: 12,
+                min_chamber_radius: 4.0,
+                max_chamber_radius: 7.0,
+                min_tunnel_width: 2.0,
+                max_tunnel_width: 3.0,
+                min_height_variance: -1.0,
+                max_height_variance: 1.0, 
+                floor_noise: 0.1, 
+                entrance_count: 2, 
+                ramp_length: 10,
+                light_color: Color::srgb(0.9, 0.7, 0.2),
+                light_intensity: 2000.0,
+                light_range: 10.0,
+                wall_light_chance: 0.20,
+            },
+            lava_tube: CaveTypeConfig {
+                cave_count: 0, 
+                min_depth: 40.0,
+                max_depth: 60.0,
+                min_chambers: 3,
+                max_chambers: 5,
+                min_chamber_radius: 8.0,
+                max_chamber_radius: 15.0,
+                min_tunnel_width: 6.0,
+                max_tunnel_width: 10.0,
+                min_height_variance: -5.0,
+                max_height_variance: -1.0, 
+                floor_noise: 0.3,
+                entrance_count: 1,
+                ramp_length: 20,
+                light_color: Color::srgb(1.0, 0.2, 0.0),
+                light_intensity: 3000.0,
+                light_range: 20.0,
+                wall_light_chance: 0.20,
+            },
+            ruin: CaveTypeConfig {
+                cave_count: 1,
+                min_depth: 10.0,
+                max_depth: 15.0,
+                min_chambers: 3,
+                max_chambers: 6,
+                min_chamber_radius: 6.0,
+                max_chamber_radius: 9.0,
+                min_tunnel_width: 4.0,
+                max_tunnel_width: 4.0,
+                min_height_variance: 0.0,
+                max_height_variance: 0.0,
+                floor_noise: 0.05,
+                entrance_count: 1,
+                ramp_length: 8,
+                light_color: Color::srgb(0.2, 0.6, 1.0),
+                light_intensity: 2500.0,
+                light_range: 15.0,
+                wall_light_chance: 0.20,
+            },
+        }
+    }
+}
+
+=== FILE: ./physics/mod.rs ===
+pub mod test_scene;
+
+use bevy::prelude::*;
+use test_scene::spawn_test_spheres;
+
+pub struct PhysicsPlugin;
+
+impl Plugin for PhysicsPlugin {
+    fn build(&self, app: &mut App) {
+        // Mağara spawn olduktan biraz sonra topları bırakmak için PostStartup
+        app.add_systems(PostStartup, spawn_test_spheres);
+    }
+}
+
+=== FILE: ./physics/test_scene.rs ===
+use bevy::prelude::*;
+use bevy_rapier3d::prelude::*;
+
+pub fn spawn_test_spheres(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let sphere_mesh = meshes.add(Sphere::new(0.5));
+    let sphere_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(1.0, 0.2, 0.2), // Kırmızı toplar
+        perceptual_roughness: 0.3,
+        ..default()
+    });
+
+    // Gökyüzünden 15 adet top bırakıyoruz
+    for i in 0..15 {
+        let pos = Vec3::new(
+            (i as f32 * 2.5) - 20.0, // X ekseninde yan yana diz
+            20.0,                    // Y ekseninde (Yukarıdan bırak)
+            -5.0,                    // Z ekseninde kameranın biraz önüne
+        );
+
+        commands.spawn((
+            PbrBundle {
+                mesh: sphere_mesh.clone(),
+                material: sphere_mat.clone(),
+                transform: Transform::from_translation(pos),
+                ..default()
+            },
+            RigidBody::Dynamic,            // Toplar hareketlidir, yerçekiminden etkilenir
+            Collider::ball(0.5),           // Topun çarpışma sınırı
+            Restitution::coefficient(0.8), // Sekme (zıplama) gücü
+        ));
+    }
+}
+
+=== FILE: ./camera/mod.rs ===
+pub mod freecam;
+
+use bevy::prelude::*;
+use freecam::{camera_look, camera_movement, setup_camera};
+
+pub struct CameraPlugin;
+
+impl Plugin for CameraPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Startup, setup_camera)
+           .add_systems(Update, (camera_movement, camera_look));
+    }
+}
+
+=== FILE: ./camera/freecam.rs ===
+use bevy::input::mouse::MouseMotion;
+use bevy::prelude::*;
+use bevy::window::PrimaryWindow;
+
+#[derive(Component)]
+pub struct FreeCam {
+    pub speed: f32,
+    pub sensitivity: f32,
+    pub pitch: f32,
+    pub yaw: f32,
+}
+
+pub fn setup_camera(mut commands: Commands) {
+    commands.spawn((
+        Camera3dBundle {
+            transform: Transform::from_xyz(0.0, 8.0, 15.0),
+            ..default()
+        },
+        FreeCam {
+            speed: 25.0,
+            sensitivity: 0.002,
+            pitch: 0.0,
+            yaw: 0.0,
+        },
+    ));
+}
+
+pub fn camera_look(
+    q_windows: Query<&Window, With<PrimaryWindow>>,
+    mut ev_mouse: EventReader<MouseMotion>,
+    mut q_camera: Query<(&mut Transform, &mut FreeCam)>,
+    mouse_buttons: Res<ButtonInput<MouseButton>>,
+) {
+    if q_windows.is_empty() {
+        return;
+    }
+
+    let Ok((mut transform, mut cam)) = q_camera.get_single_mut() else {
+        return;
+    };
+
+    // Yalnızca farenin sağ tuşuna basılı tutulduğunda kamerayı döndür
+    if mouse_buttons.pressed(MouseButton::Right) {
+        let mut delta = Vec2::ZERO;
+        for ev in ev_mouse.read() {
+            delta += ev.delta;
+        }
+
+        if delta != Vec2::ZERO {
+            cam.yaw -= delta.x * cam.sensitivity;
+            cam.pitch -= delta.y * cam.sensitivity;
+            
+            // Kameranın ters dönmesini engellemek için dikey açıyı sınırla
+            cam.pitch = cam.pitch.clamp(
+                -std::f32::consts::FRAC_PI_2 + 0.01,
+                std::f32::consts::FRAC_PI_2 - 0.01,
+            );
+
+            // Yeni rotasyonu Quaternion olarak hesapla ve uygula
+            transform.rotation = Quat::from_axis_angle(Vec3::Y, cam.yaw)
+                * Quat::from_axis_angle(Vec3::X, cam.pitch);
+        }
+    } else {
+        // Fare olaylarını tüketerek birikmesini önle
+        ev_mouse.clear(); 
+    }
+}
+
+pub fn camera_movement(
+    time: Res<Time>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut q_camera: Query<(&mut Transform, &FreeCam)>,
+) {
+    let Ok((mut transform, cam)) = q_camera.get_single_mut() else {
+        return;
+    };
+
+    let mut velocity = Vec3::ZERO;
+    
+    // Rotasyona göre yerel yön vektörleri
+    let forward = transform.rotation * Vec3::NEG_Z;
+    let right = transform.rotation * Vec3::X;
+    let up = Vec3::Y;
+
+    if keys.pressed(KeyCode::KeyW) {
+        velocity += forward;
+    }
+    if keys.pressed(KeyCode::KeyS) {
+        velocity -= forward;
+    }
+    if keys.pressed(KeyCode::KeyD) {
+        velocity += right;
+    }
+    if keys.pressed(KeyCode::KeyA) {
+        velocity -= right;
+    }
+    if keys.pressed(KeyCode::Space) {
+        velocity += up;
+    }
+    if keys.pressed(KeyCode::ShiftLeft) {
+        velocity -= up;
+    }
+
+    if velocity.length_squared() > 0.0 {
+        // Hızlı uçuş için sol kontrol tuşuna basılı tut
+        let speed_multiplier = if keys.pressed(KeyCode::ControlLeft) {
+            3.0
+        } else {
+            1.0
+        };
+        
+        velocity = velocity.normalize();
+        let translation = velocity * cam.speed * speed_multiplier * time.delta_seconds();
+        transform.translation += translation;
+    }
+}
+

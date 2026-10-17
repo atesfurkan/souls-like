@@ -22,7 +22,7 @@ pub fn animate_weapon(
                 transform.translation = idle_pos;
                 transform.rotation = idle_rot;
             }
-            CombatState::Windup { timer, attack_type } => {
+            CombatState::Windup { timer, attack_type, charge_timer: _  } => {
                 let t = timer.fraction();
                 let (windup_pos, windup_rot) = get_windup_transform(*attack_type);
                 transform.translation = idle_pos.lerp(windup_pos, t);
@@ -64,6 +64,15 @@ fn get_windup_transform(attack: AttackType) -> (Vec3, Quat) {
             Vec3::new(1.2, 0.5, -0.2),
             Quat::from_rotation_y(-std::f32::consts::FRAC_PI_4),
         ),
+        // YENİ: Unarmed varyantları (Silahsız oyuncuya bir şey eklenirse fallback)
+        AttackType::UnarmedLeft => (
+            Vec3::new(-0.4, 0.5, 0.0),
+            Quat::from_rotation_y(std::f32::consts::FRAC_PI_4),
+        ),
+        AttackType::UnarmedRight => (
+            Vec3::new(0.4, 0.5, 0.0),
+            Quat::from_rotation_y(-std::f32::consts::FRAC_PI_4),
+        ),
     }
 }
 
@@ -84,6 +93,15 @@ fn get_active_transform(attack: AttackType) -> (Vec3, Quat) {
         AttackType::RightSwing => (
             Vec3::new(-1.0, 0.5, -1.0),
             Quat::from_rotation_y(std::f32::consts::FRAC_PI_2) * Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+        ),
+        // YENİ: Unarmed varyantları
+        AttackType::UnarmedLeft => (
+            Vec3::new(-0.2, 0.5, -1.0),
+            Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+        ),
+        AttackType::UnarmedRight => (
+            Vec3::new(0.2, 0.5, -1.0),
+            Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
         ),
     }
 }

@@ -1,28 +1,42 @@
 use bevy::prelude::*;
 
-// Kalkanın görsel ve çarpışma kökünü temsil eder (Çift component çakışmasını önler)
+#[derive(Component, Clone)]
+pub enum DefaultShieldShape {
+    Box { width: f32, height: f32, depth: f32 },
+    Cylinder { radius: f32, height: f32 },
+}
+
+#[derive(Component, Clone)]
+pub enum ShieldVisualData {
+    ProgrammerArt {
+        shape: DefaultShieldShape,
+        color: Color,
+    },
+}
+
 #[derive(Component)]
 pub struct ShieldVisualAnchor;
 
-// Kalkanın RPG istatistikleri
 #[derive(Component)]
 pub struct Shield {
-    pub block_rate: f32,                // Engellenecek hasar oranı (örn: %100 için 1.0, %80 için 0.8)
-    pub stamina_cost_multiplier: f32,   // Hasar başına gidecek dayanıklılık çarpanı
-    pub parry_window: f32,              // Parry penceresi (saniye)
+    pub name: String,
+    pub block_rate: f32,
+    pub stamina_cost_multiplier: f32,
+    pub parry_window: f32,
 }
 
-// Fiziksel çarpışmayı algılayacak işaretçi
 #[derive(Component)]
 pub struct ShieldBox {
-    pub owner: Entity, // Kalkanın sahibi (Player veya Enemy)
+    pub owner: Entity,
 }
 
-// Görsel mesh'lerin ekleneceği child entity işaretçisi
+// YENİ: Unarmed block için geçici olarak yaratılacak hitbox'ı bulmamızı sağlar
+#[derive(Component)]
+pub struct UnarmedShieldBox;
+
 #[derive(Component)]
 pub struct EquippedShield;
 
-// Savunma durum makinesi (FSM)
 #[derive(Component, Default)]
 pub enum BlockingState {
     #[default]
@@ -31,5 +45,3 @@ pub enum BlockingState {
     Blocking,
     GuardBroken { timer: Timer },
 }
-
-

@@ -1,0 +1,353 @@
+=== FILE: objects/plugin.rs ===
+use bevy::prelude::*;
+use super::spawn::spawn_objects;
+use super::components::{Chest, Stalactite, Tree};
+
+pub struct ObjectsPlugin;
+
+impl Plugin for ObjectsPlugin {
+    fn build(&self, app: &mut App) {
+        app.register_type::<Chest>()
+           .register_type::<Stalactite>()
+           .register_type::<Tree>()
+           .add_systems(Update, spawn_objects);
+    }
+}
+=== FILE: objects/spawn.rs ===
+use bevy::prelude::*;
+use crate::game::placement::components::{Placement, PlacementKind, PlacementState, ObjectSpawnVariant};
+use crate::game::world::analysis::components::SurfaceType;
+use super::chest::build_chest;
+use super::stalactite::build_stalactite;
+use super::tree::build_tree;
+
+pub fn spawn_objects(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut placement_query: Query<(Entity, &Transform, &mut Placement)>,
+) {
+    for (_placement_entity, transform, mut placement) in placement_query.iter_mut() {
+        if placement.state != PlacementState::Active {
+            continue;
+        }
+
+        let variant = match &placement.kind {
+            PlacementKind::Object(v) => v.clone(),
+            _ => continue,
+        };
+
+        placement.state = PlacementState::Consumed;
+
+        let position = transform.translation;
+        let normal = placement.normal;
+        let surface_type = placement.surface_type;
+
+        match variant {
+            ObjectSpawnVariant::Chest => {
+                if surface_type == SurfaceType::Floor {
+                    build_chest(&mut commands, position, normal, &mut meshes, &mut materials);
+                }
+            }
+            ObjectSpawnVariant::Stalactite => {
+                if surface_type == SurfaceType::Ceiling {
+                    build_stalactite(&mut commands, position, normal, &mut meshes, &mut materials);
+                }
+            }
+            ObjectSpawnVariant::Tree => {
+                // Ağacın semantik yerleşme kuralı
+                if surface_type == SurfaceType::Floor {
+                    build_tree(&mut commands, position, normal, &mut meshes, &mut materials);
+                }
+            }
+        }
+    }
+}
+=== FILE: objects/mod.rs ===
+pub mod components;
+pub mod chest;
+pub mod stalactite;
+pub mod tree;
+pub mod spawn;
+pub mod plugin;
+=== FILE: objects/chest.rs ===
+use bevy::prelude::*;
+use bevy_rapier3d::prelude::*;
+use super::components::Chest;
+
+pub fn build_chest(
+    commands: &mut Commands,
+    position: Vec3,
+    normal: Vec3,
+    meshes: &mut ResMut<Assets<Mesh>>,
+    materials: &mut ResMut<Assets<StandardMaterial>>,
+) {
+    let mesh = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
+    let material = materials.add(Color::srgb(0.4, 0.26, 0.13));
+    let collider = Collider::cuboid(0.5, 0.5, 0.5);
+
+    // Sandığın zemine saplanmaması ve düşme efektinin çalışması için 
+    // hem yüzey normali yönünde hem de havaya (Y) doğru ekstra offset veriyoruz.
+    let offset = normal * 0.5 + Vec3::Y * 1.5;
+    
+    // Yüzey normaline göre hizalanma
+    let rotation = if normal.distance(Vec3::NEG_Y) < 0.01 {
+        Quat::from_rotation_x(std::f32::consts::PI)
+    } else {
+        Quat::from_rotation_arc(Vec3::Y, normal)
+    };
+
+    commands.spawn((
+        PbrBundle {
+            mesh,
+            material,
+            transform: Transform::from_translation(position + offset).with_rotation(rotation),
+            ..default()
+        },
+        // YENİ: Yerçekiminden etkilenebilmesi için Dynamic (hareketli) yapıldı.
+        RigidBody::Dynamic, 
+        collider,
+        // Sandığın düşerken takla atmaması veya devrilmemesi için rotasyon eksenlerini kilitliyoruz. 
+        // Üretildiği eğimde kalarak dümdüz yere inecektir.
+        LockedAxes::ROTATION_LOCKED,
+        // Eğimli zemine oturduğunda buz pateni gibi kayıp uçurumdan düşmemesi için sürtünme/sönümleme.
+        Damping { linear_damping: 3.0, angular_damping: 3.0 },
+        Chest,
+    ));
+}
+=== FILE: objects/tree.rs ===
+use bevy::prelude::*;
+use bevy_rapier3d::prelude::*;
+use super::components::Tree;
+
+pub fn build_tree(
+    commands: &mut Commands,
+    position: Vec3,
+    normal: Vec3,
+    meshes: &mut ResMut<Assets<Mesh>>,
+    materials: &mut ResMut<Assets<StandardMaterial>>,
+) {
+    let trunk_radius = 0.3;
+    let trunk_height = 2.0;
+    let leaves_radius = 1.5;
+    let leaves_height = 3.0;
+
+    let trunk_mesh = meshes.add(Cylinder::new(trunk_radius, trunk_height));
+    let trunk_mat = materials.add(Color::srgb(0.35, 0.22, 0.13)); 
+
+    let leaves_mesh = meshes.add(Cone { radius: leaves_radius, height: leaves_height });
+    let leaves_mat = materials.add(Color::srgb(0.15, 0.45, 0.15));
+
+    // Ağacın zeminin eğimine oturması için yönelim
+    let rotation = if normal.distance(Vec3::NEG_Y) < 0.01 {
+        Quat::from_rotation_x(std::f32::consts::PI)
+    } else {
+        Quat::from_rotation_arc(Vec3::Y, normal)
+    };
+
+    // Cylinder mesh'inin ağırlık merkezi (origin) ortasında olduğu için, ağacın zemine tam oturması adına
+    // gövde uzunluğunun yarısı kadar (normal ekseninde) yukarı kaydırıyoruz.
+    let trunk_offset = normal * (trunk_height / 2.0);
+    
+    // Çarpışmaların ağaç gövdesinden gerçekleşmesini sağlayan katı nesne tanımlayıcı
+    let collider = Collider::cylinder(trunk_height / 2.0, trunk_radius);
+
+    commands.spawn((
+        SpatialBundle {
+            transform: Transform::from_translation(position + trunk_offset).with_rotation(rotation),
+            ..default()
+        },
+        RigidBody::Fixed,
+        collider,
+        Tree,
+    )).with_children(|parent| {
+        // Gövde Visual'i (Base offsetini spatial bundle sağladığı için Transform::default)
+        parent.spawn(PbrBundle {
+            mesh: trunk_mesh,
+            material: trunk_mat,
+            transform: Transform::default(),
+            ..default()
+        });
+
+        // Yapraklar (Koni). Gövdenin bittiği yere oturacak şekilde pozisyonlanır.
+        parent.spawn(PbrBundle {
+            mesh: leaves_mesh,
+            material: leaves_mat,
+            transform: Transform::from_translation(Vec3::Y * ((trunk_height / 2.0) + (leaves_height / 2.0))),
+            ..default()
+        });
+    });
+}
+
+=== FILE: objects/stalactite.rs ===
+use bevy::prelude::*;
+use bevy_rapier3d::prelude::*;
+use super::components::Stalactite;
+
+pub fn build_stalactite(
+    commands: &mut Commands,
+    position: Vec3,
+    _normal: Vec3,
+    meshes: &mut ResMut<Assets<Mesh>>,
+    materials: &mut ResMut<Assets<StandardMaterial>>,
+) {
+    let radius = 0.3;
+    let height = 1.5;
+
+    let mesh = meshes.add(Cone { radius, height });
+    let material = materials.add(Color::srgb(0.35, 0.35, 0.35));
+    let collider = Collider::cone(height / 2.0, radius);
+
+    // Sarkıtların tavanın şekli/eğimi ne olursa olsun sivri ucunun her zaman YERE (Gravity) bakması
+    // istendiği için, normal'i iptal edip katı bir -Y offseti ve PI (180 derece) dönüşü uyguluyoruz.
+    let offset = Vec3::NEG_Y * (height / 2.0);
+    let rotation = Quat::from_rotation_x(std::f32::consts::PI);
+
+    commands.spawn((
+        PbrBundle {
+            mesh,
+            material,
+            // position artık tavanın tam yüzey noktası, offset ile koniyi aşağı sarkıtıyoruz
+            transform: Transform::from_translation(position + offset).with_rotation(rotation),
+            ..default()
+        },
+        RigidBody::Fixed,
+        collider,
+        Stalactite,
+    ));
+}
+=== FILE: objects/components.rs ===
+use bevy::prelude::*;
+
+#[derive(Component, Reflect, Clone, Debug, Default)]
+#[reflect(Component)]
+pub struct Chest;
+
+#[derive(Component, Reflect, Clone, Debug, Default)]
+#[reflect(Component)]
+pub struct Stalactite;
+
+#[derive(Component, Reflect, Clone, Debug, Default)]
+#[reflect(Component)]
+pub struct Tree;
+=== FILE: placement/plugin.rs ===
+use bevy::prelude::*;
+use super::components::{Placement, PlacementConfig};
+
+pub struct PlacementPlugin;
+
+impl Plugin for PlacementPlugin {
+    fn build(&self, app: &mut App) {
+        // İleride save/load sistemleri ve editor için register işlemi
+        app.register_type::<Placement>();
+        
+        // Yoğunluk ayarlarımızı Resource olarak başlatıyoruz
+        app.init_resource::<PlacementConfig>();
+    }
+}
+
+=== FILE: placement/mod.rs ===
+pub mod components;
+pub mod plugin;
+
+=== FILE: placement/components.rs ===
+use bevy::prelude::*;
+use crate::game::world::analysis::components::SurfaceType;
+use crate::game::world::generation::layout::ZoneType;
+
+#[derive(Reflect, Clone, Debug, PartialEq)]
+pub enum PlacementRuleKind {
+    DynamicEnemy,
+    Object(ObjectSpawnVariant),
+}
+
+#[derive(Reflect, Clone, Debug)]
+pub struct PlacementRule {
+    pub kind: PlacementRuleKind,
+    pub count_per_chunk: usize,
+    pub surface_requirement: SurfaceType,
+    pub open_sky_requirement: Option<bool>,
+}
+
+#[derive(Resource, Clone, Debug)]
+pub struct PlacementConfig {
+    pub rules: Vec<PlacementRule>,
+}
+
+impl Default for PlacementConfig {
+    fn default() -> Self {
+        Self {
+            rules: vec![
+                PlacementRule {
+                    kind: PlacementRuleKind::Object(ObjectSpawnVariant::Chest),
+                    count_per_chunk: 1,
+                    surface_requirement: SurfaceType::Floor,
+                    open_sky_requirement: None,
+                },
+                PlacementRule {
+                    kind: PlacementRuleKind::Object(ObjectSpawnVariant::Stalactite),
+                    count_per_chunk: 0,
+                    surface_requirement: SurfaceType::Ceiling,
+                    open_sky_requirement: None,
+                },
+                PlacementRule {
+                    kind: PlacementRuleKind::DynamicEnemy,
+                    count_per_chunk: 2,
+                    surface_requirement: SurfaceType::Floor,
+                    open_sky_requirement: None,
+                },
+                PlacementRule {
+                    kind: PlacementRuleKind::Object(ObjectSpawnVariant::Tree),
+                    count_per_chunk: 0,
+                    surface_requirement: SurfaceType::Floor,
+                    open_sky_requirement: Some(true),
+                },
+            ],
+        }
+    }
+}
+
+#[derive(Component, Reflect, Clone, Debug, Default)]
+#[reflect(Component)]
+pub struct Placement {
+    pub kind: PlacementKind,
+    pub state: PlacementState,
+    pub chunk_coord: IVec3, 
+    pub local_id: usize,
+    pub normal: Vec3,
+    pub surface_type: SurfaceType,
+    #[reflect(ignore)]
+    pub zone: ZoneType, 
+}
+
+#[derive(Reflect, Clone, Debug, PartialEq, Default)]
+pub enum PlacementKind {
+    #[default]
+    PlayerSpawn,
+    Enemy(EnemySpawnVariant),
+    Object(ObjectSpawnVariant),
+}
+
+#[derive(Reflect, Clone, Debug, PartialEq)]
+pub enum EnemySpawnVariant {
+    LightSpearman,
+    Vanguard,
+    HeavyDefender,
+    BossArena,
+    UnarmedMonster,
+}
+
+#[derive(Reflect, Clone, Debug, PartialEq)]
+pub enum ObjectSpawnVariant {
+    Chest,
+    Stalactite,
+    Tree,
+}
+
+#[derive(Reflect, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PlacementState {
+    #[default]
+    Active,
+    Consumed,  
+    Discarded, 
+}

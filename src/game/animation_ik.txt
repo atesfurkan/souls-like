@@ -1,0 +1,897 @@
+=== FILE: animation/plugin.rs ===
+use bevy::prelude::*;
+use super::systems::{
+    cache_character_bones, 
+    load_animations, 
+    setup_animation_graph, 
+    update_animations_from_intent
+};
+
+pub struct AnimationPlugin;
+
+impl Plugin for AnimationPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Startup, load_animations)
+           .add_systems(Update, (
+               cache_character_bones,
+               setup_animation_graph, // Eski play_default_animation yerine bu geldi
+               update_animations_from_intent, // Niyete göre animasyon değiştiren sistem
+           ));
+    }
+}
+
+=== FILE: animation/mod.rs ===
+pub mod components;
+pub mod plugin;
+pub mod systems;
+
+=== FILE: animation/components.rs ===
+use bevy::prelude::*;
+use bevy::animation::graph::AnimationNodeIndex;
+
+#[derive(Component, Debug, Default, Reflect)]
+pub struct AnimationIntent {
+    pub is_moving: bool,
+    pub is_sprinting: bool,
+    pub is_in_air: bool,
+    pub is_blocking: bool,
+    pub is_attacking: bool,
+    pub look_at_target: Option<Vec3>,
+}
+
+#[derive(Component)]
+pub struct AnimationNodes {
+    pub idle: AnimationNodeIndex,
+    pub walk: AnimationNodeIndex,
+    pub run: AnimationNodeIndex,
+    pub jump: AnimationNodeIndex,
+}
+
+#[derive(Component)]
+pub struct ActiveAnimation(pub AnimationNodeIndex);
+
+#[derive(Resource)]
+pub struct CharacterAnimations {
+    pub idle: Handle<AnimationClip>,
+    pub walk: Handle<AnimationClip>,
+    pub run: Handle<AnimationClip>,
+    pub jump: Handle<AnimationClip>,
+}
+
+#[derive(Component, Debug, Reflect)]
+pub struct CharacterBones {
+    pub is_linked: bool,
+    pub root: Option<Entity>,
+    pub hips: Option<Entity>,
+    pub spine: Option<Entity>,
+    pub head: Option<Entity>,
+    pub left_arm: Option<Entity>,     
+    pub left_forearm: Option<Entity>, 
+    pub left_hand: Option<Entity>,    
+    pub right_arm: Option<Entity>,
+    pub right_forearm: Option<Entity>,
+    pub right_hand: Option<Entity>,
+    pub left_thigh: Option<Entity>,
+    pub left_shin: Option<Entity>,
+    pub left_foot: Option<Entity>,
+    pub right_thigh: Option<Entity>,
+    pub right_shin: Option<Entity>,
+    pub right_foot: Option<Entity>,
+}
+
+impl Default for CharacterBones {
+    fn default() -> Self {
+        Self {
+            is_linked: false,
+            root: None,
+            hips: None,
+            spine: None,
+            head: None,
+            left_arm: None,
+            left_forearm: None,
+            left_hand: None,
+            right_arm: None,
+            right_forearm: None,
+            right_hand: None,
+            left_thigh: None,
+            left_shin: None,
+            left_foot: None,
+            right_thigh: None,
+            right_shin: None,
+            right_foot: None,
+        }
+    }
+}
+=== FILE: animation/systems.rs ===
+use bevy::prelude::*;
+use super::components::{
+    ActiveAnimation, AnimationIntent, AnimationNodes, CharacterAnimations, CharacterBones,
+};
+
+pub const BONE_HIPS: &str = "mixamorig:Hips";
+pub const BONE_SPINE: &str = "mixamorig:Spine";
+pub const BONE_SPINE1: &str = "mixamorig:Spine1";
+pub const BONE_HEAD: &str = "mixamorig:Head";
+
+pub const BONE_RIGHT_ARM: &str = "mixamorig:RightArm";
+pub const BONE_RIGHT_FOREARM: &str = "mixamorig:RightForeArm";
+pub const BONE_RIGHT_HAND: &str = "mixamorig:RightHand";
+
+pub const BONE_LEFT_ARM: &str = "mixamorig:LeftArm";
+pub const BONE_LEFT_FOREARM: &str = "mixamorig:LeftForeArm";
+pub const BONE_LEFT_HAND: &str = "mixamorig:LeftHand";
+
+pub const BONE_LEFT_UP_LEG: &str = "mixamorig:LeftUpLeg";
+pub const BONE_LEFT_LEG: &str = "mixamorig:LeftLeg";
+pub const BONE_LEFT_FOOT: &str = "mixamorig:LeftFoot";
+
+pub const BONE_RIGHT_UP_LEG: &str = "mixamorig:RightUpLeg";
+pub const BONE_RIGHT_LEG: &str = "mixamorig:RightLeg";
+pub const BONE_RIGHT_FOOT: &str = "mixamorig:RightFoot";
+
+pub fn update_animations_from_intent(
+    mut anim_query: Query<(
+        Entity,
+        &AnimationNodes,
+        &mut ActiveAnimation,
+        &mut AnimationPlayer,
+    )>,
+    parent_query: Query<&Parent>,
+    intent_query: Query<&AnimationIntent>,
+) {
+    for (entity, nodes, mut active_anim, mut player) in anim_query.iter_mut() {
+        let mut current_entity = entity;
+        let mut found_intent = None;
+
+        while let Ok(parent) = parent_query.get(current_entity) {
+            let parent_entity = parent.get();
+            if let Ok(intent) = intent_query.get(parent_entity) {
+                found_intent = Some(intent);
+                break;
+            }
+            current_entity = parent_entity;
+        }
+
+        let Some(intent) = found_intent else {
+            continue;
+        };
+
+        let target_node = if intent.is_in_air {
+            nodes.jump
+        } else if intent.is_moving {
+            if intent.is_sprinting {
+                nodes.run
+            } else {
+                nodes.walk
+            }
+        } else {
+            nodes.idle
+        };
+
+        if active_anim.0 == target_node && player.is_playing_animation(target_node) {
+            continue;
+        }
+
+        player.stop_all();
+
+        if target_node == nodes.jump {
+            player.play(target_node);
+        } else {
+            player.play(target_node).repeat();
+        }
+
+        active_anim.0 = target_node;
+    }
+}
+
+pub fn load_animations(mut commands: Commands, asset_server: Res<AssetServer>) {
+    let animations = CharacterAnimations {
+        idle: asset_server.load("models/animations/idle.glb#Animation0"),
+        walk: asset_server.load("models/animations/walk_sword_shield.glb#Animation0"),
+        run: asset_server.load("models/animations/run_sword_shield.glb#Animation0"),
+        jump: asset_server.load("models/animations/jump_sword_shield.glb#Animation0"),
+    };
+
+    commands.insert_resource(animations);
+    info!("Karakter animasyonları belleğe yüklendi.");
+}
+
+pub fn setup_animation_graph(
+    mut commands: Commands,
+    mut players: Query<(Entity, &mut AnimationPlayer), Added<AnimationPlayer>>,
+    animations: Res<CharacterAnimations>,
+    mut graphs: ResMut<Assets<AnimationGraph>>,
+) {
+    for (entity, mut player) in &mut players {
+        let mut graph = AnimationGraph::new();
+
+        let idle_node = graph.add_clip(animations.idle.clone(), 1.0, graph.root);
+        let walk_node = graph.add_clip(animations.walk.clone(), 1.0, graph.root);
+        let run_node = graph.add_clip(animations.run.clone(), 1.0, graph.root);
+        let jump_node = graph.add_clip(animations.jump.clone(), 1.0, graph.root);
+
+        let graph_handle = graphs.add(graph);
+        commands.entity(entity).insert(graph_handle);
+
+        commands.entity(entity).insert(AnimationNodes {
+            idle: idle_node,
+            walk: walk_node,
+            run: run_node,
+            jump: jump_node,
+        });
+
+        commands.entity(entity).insert(ActiveAnimation(idle_node));
+
+        player.play(idle_node).repeat();
+        info!("AnimationGraph tüm kliplerle kuruldu ve Idle başlatıldı.");
+    }
+}
+
+pub fn cache_character_bones(
+    mut query: Query<(Entity, &mut CharacterBones)>,
+    children_query: Query<&Children>,
+    names_query: Query<(Entity, &Name)>,
+) {
+    for (entity, mut bones) in query.iter_mut() {
+        if bones.is_linked {
+            continue;
+        }
+
+        let mut found_count = 0;
+        let target_count = 14;
+
+        for descendant in children_query.iter_descendants(entity) {
+            if let Ok((bone_entity, name)) = names_query.get(descendant) {
+                let name_str = name.as_str();
+                match name_str {
+                    BONE_HIPS => {
+                        bones.hips = Some(bone_entity);
+                        found_count += 1;
+                    }
+                    BONE_SPINE | BONE_SPINE1 => {
+                        if bones.spine.is_none() {
+                            bones.spine = Some(bone_entity);
+                            found_count += 1;
+                        }
+                    }
+                    BONE_HEAD => {
+                        bones.head = Some(bone_entity);
+                        found_count += 1;
+                    }
+                    BONE_RIGHT_ARM => {
+                        bones.right_arm = Some(bone_entity);
+                        found_count += 1;
+                    }
+                    BONE_RIGHT_FOREARM => {
+                        bones.right_forearm = Some(bone_entity);
+                        found_count += 1;
+                    }
+                    BONE_RIGHT_HAND => {
+                        bones.right_hand = Some(bone_entity);
+                        found_count += 1;
+                    }
+                    BONE_LEFT_ARM => {
+                        bones.left_arm = Some(bone_entity);
+                        found_count += 1;
+                    }
+                    BONE_LEFT_FOREARM => {
+                        bones.left_forearm = Some(bone_entity);
+                        found_count += 1;
+                    }
+                    BONE_LEFT_HAND => {
+                        bones.left_hand = Some(bone_entity);
+                        found_count += 1;
+                    }
+                    BONE_LEFT_UP_LEG => {
+                        bones.left_thigh = Some(bone_entity);
+                        found_count += 1;
+                    }
+                    BONE_LEFT_LEG => {
+                        bones.left_shin = Some(bone_entity);
+                        found_count += 1;
+                    }
+                    BONE_LEFT_FOOT => {
+                        bones.left_foot = Some(bone_entity);
+                        found_count += 1;
+                    }
+                    BONE_RIGHT_UP_LEG => {
+                        bones.right_thigh = Some(bone_entity);
+                        found_count += 1;
+                    }
+                    BONE_RIGHT_LEG => {
+                        bones.right_shin = Some(bone_entity);
+                        found_count += 1;
+                    }
+                    BONE_RIGHT_FOOT => {
+                        bones.right_foot = Some(bone_entity);
+                        found_count += 1;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if found_count >= target_count {
+            bones.is_linked = true;
+            info!("Tüm anatomik kemikler başarıyla tarandı ve bağlandı!");
+        }
+    }
+}
+=== FILE: ik/plugin.rs ===
+use bevy::animation::animate_targets;
+use bevy::prelude::*;
+use bevy::transform::TransformSystem;
+
+use crate::game::ik::systems::{
+    maintain_shield_orientation, maintain_weapon_orientation, solve_two_bone_ik,
+    update_shield_ik_target, update_weapon_ik_target,
+};
+
+pub struct IkPlugin;
+
+impl Plugin for IkPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(
+            PostUpdate,
+            (
+                // 1. Önce IK hedeflerini ve ağırlıklarını güncelle
+                update_shield_ik_target,
+                update_weapon_ik_target,
+                // 2. Ardından kemik rotasyonlarını hesaplayıp Transform'lara yaz
+                solve_two_bone_ik,
+                maintain_shield_orientation,
+                maintain_weapon_orientation,
+            )
+                .chain()
+                // Bevy 0.14: Önce animasyon karesi kemiklere uygulansın (animate_targets)
+                .after(animate_targets)
+                // Daha sonra IK sonuçları dünyadaki nihai global matrislere aktarılsın (TransformPropagate)
+                .before(TransformSystem::TransformPropagate),
+        );
+    }
+}
+=== FILE: ik/mod.rs ===
+pub mod components;
+pub mod plugin;
+pub mod systems;
+
+=== FILE: ik/components.rs ===
+use bevy::prelude::*;
+
+/// Karakterin belirli bir uzvu için ulaşılması hedeflenen noktayı temsil eder.
+/// Bu bileşen genellikle oyundaki mantık (Combat/Shield) tarafından güncellenir.
+#[derive(Component, Debug, Reflect)]
+pub struct IkTarget {
+    pub position: Vec3, // Hedefin dünya veya lokal koordinattaki pozisyonu
+    /// 0.0 (Tamamen FK/Animasyon) ile 1.0 (Tamamen IK) arası geçiş değeri.
+    /// Smooth interpolation (slerp) için kullanılır.
+    pub weight: f32, 
+}
+
+/// 2-Bone IK algoritmasının ihtiyaç duyduğu kemik zinciri.
+/// (Örn: UpperArm -> Forearm -> Hand)
+#[derive(Component, Debug, Reflect)]
+pub struct TwoBoneIkChain {
+    pub root: Entity, // Kök kemik (Örn: Omuz / LeftArm)
+    pub mid: Entity,  // Orta kemik (Örn: Dirsek / LeftForearm)
+    pub tip: Entity,  // Uç kemik (Örn: El / LeftHand)
+    pub pole_vector: Vec3, // Dirseğin veya dizin bükülme yönünü belirleyen vektör
+}
+
+=== FILE: ik/systems.rs ===
+use super::components::{IkTarget, TwoBoneIkChain};
+use crate::game::combat::components::{AttackIntent, CombatState, EquippedWeapon, GuardIntent, LeftHand, RightHand};
+use crate::game::lock_on::components::LockOnState;
+use crate::game::player::components::Player;
+use crate::game::shield::components::{BlockingState, EquippedShield, ShieldVisualAnchor};
+use crate::game::weapon::components::AttackType;
+use bevy::prelude::*;
+use crate::game::shield::data::ShieldType;
+
+pub fn maintain_weapon_orientation(
+    weapon_query: Query<(Entity, &Parent, &IkTarget), With<EquippedWeapon>>,
+    mut transforms: Query<&mut Transform>,
+    parents: Query<&Parent>,
+    combat_query: Query<&CombatState>,
+) {
+    for (weapon_entity, weapon_parent, ik_target) in weapon_query.iter() {
+        if ik_target.weight <= 0.01 {
+            continue;
+        }
+
+        let mut current_entity = weapon_parent.get();
+        let mut combat_data = None;
+        let mut owner_entity = current_entity;
+
+        loop {
+            if let Ok(data) = combat_query.get(current_entity) {
+                combat_data = Some(data);
+                owner_entity = current_entity;
+                break;
+            }
+            if let Ok(p) = parents.get(current_entity) {
+                current_entity = p.get();
+            } else {
+                break;
+            }
+        }
+
+        let Some(combat_state) = combat_data else {
+            continue;
+        };
+
+        let owner_global = compute_manual_global_transform(owner_entity, &transforms, &parents);
+        let hand_global =
+            compute_manual_global_transform(weapon_parent.get(), &transforms, &parents);
+
+        let base_weapon_rot = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_4);
+
+        let (is_thrust, thrust_weight) = match combat_state {
+            CombatState::Windup {
+                timer, attack_type, ..
+            } if *attack_type == AttackType::Thrust => (true, timer.fraction()),
+            CombatState::Active { attack_type, .. } if *attack_type == AttackType::Thrust => {
+                (true, 1.0)
+            }
+            CombatState::Recovery { timer, attack_type } if *attack_type == AttackType::Thrust => {
+                (true, 1.0 - timer.fraction())
+            }
+            _ => (false, 0.0),
+        };
+
+        let target_local_rot = if is_thrust && thrust_weight > 0.0 {
+            let desired_global_rot =
+                owner_global.rotation * Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
+            let thrust_local_rot = hand_global.rotation.inverse() * desired_global_rot;
+            base_weapon_rot.slerp(thrust_local_rot, thrust_weight)
+        } else {
+            base_weapon_rot
+        };
+
+        if let Ok(mut weapon_transform) = transforms.get_mut(weapon_entity) {
+            let safe_weight = ik_target.weight.clamp(0.0, 1.0);
+            weapon_transform.rotation = weapon_transform
+                .rotation
+                .slerp(target_local_rot, safe_weight);
+        }
+    }
+}
+
+pub fn update_weapon_ik_target(
+    mut weapon_query: Query<
+        (
+            &mut IkTarget,
+            &mut TwoBoneIkChain,
+            &Parent,
+            Option<&EquippedWeapon>,
+            Option<&RightHand>,
+            Option<&LeftHand>,
+        ),
+    >,
+    // Player'dan BlockingState ve ShieldType bilgisini çekiyoruz
+    owner_query: Query<(&CombatState, &AttackIntent, &Transform, Option<&BlockingState>, Option<&ShieldType>)>,
+    parent_query: Query<&Parent>,
+    time: Res<Time>,
+) {
+    for (mut ik_target, mut chain, initial_parent, _is_weapon, is_right, is_left) in weapon_query.iter_mut() {
+        let mut current_entity = initial_parent.get();
+        let mut owner_data = None;
+
+        loop {
+            if let Ok(data) = owner_query.get(current_entity) {
+                owner_data = Some(data);
+                break;
+            }
+            if let Ok(parent) = parent_query.get(current_entity) {
+                current_entity = parent.get();
+            } else {
+                break;
+            }
+        }
+
+        let Some((combat_state, attack_intent, owner_transform, blocking_state_opt, shield_type_opt)) = owner_data else {
+            continue;
+        };
+
+        // --- UNARMED FRONT GUARD MANTIĞI ---
+        let is_blocking = match blocking_state_opt {
+            Some(BlockingState::Blocking) | Some(BlockingState::Parrying { .. }) => true,
+            _ => false,
+        };
+        // Oyuncunun üzerinde ShieldType yoksa kalkanı yoktur (Unarmed).
+        let is_unarmed = shield_type_opt.is_none();
+
+        if is_blocking && *combat_state == CombatState::Idle && is_unarmed {
+            let target_weight = 1.0;
+            let lerp_factor = (time.delta_seconds() * 25.0).clamp(0.0, 1.0);
+            ik_target.weight = ik_target.weight.lerp(target_weight, lerp_factor);
+
+            if ik_target.weight > 0.01 {
+                if is_left.is_some() {
+                    // Sol el pozisyonu: Merkeze sarılmak yerine önde, dışarıda ve göğüs hizasında
+                    let local_target = Vec3::new(-0.25, 0.35, -0.4);
+                    ik_target.position = owner_transform.transform_point(local_target);
+                    // Dirsek (Pole Vector) dışarı ve aşağı baksın, doğal kompakt bir savunma hattı olsun
+                    chain.pole_vector = Vec3::new(-1.0, -1.0, 0.0).normalize_or_zero();
+                } else if is_right.is_some() {
+                    // Sağ el pozisyonu: Sol el ile simetrik, önde ve göğüs hizasında
+                    let local_target = Vec3::new(0.25, 0.35, -0.4);
+                    ik_target.position = owner_transform.transform_point(local_target);
+                    // Dirsek dışarı ve aşağı baksın
+                    chain.pole_vector = Vec3::new(1.0, -1.0, 0.0).normalize_or_zero();
+                }
+            }
+            
+            // Eğer karakter savunma (block) pozisyonundaysa, silah atak pozisyonlarına geçmesin
+            continue;
+        }
+        // --- UNARMED FRONT GUARD MANTIĞI BİTİŞ ---
+
+        if is_right.is_some() && attack_intent.current == AttackType::UnarmedLeft {
+            ik_target.weight = ik_target.weight.lerp(0.0, (time.delta_seconds() * 25.0).clamp(0.0, 1.0));
+            continue;
+        }
+        if is_left.is_some() && attack_intent.current == AttackType::UnarmedRight {
+            ik_target.weight = ik_target.weight.lerp(0.0, (time.delta_seconds() * 25.0).clamp(0.0, 1.0));
+            continue;
+        }
+
+        if (is_right.is_some() || is_left.is_some()) 
+            && (attack_intent.current != AttackType::UnarmedRight && attack_intent.current != AttackType::UnarmedLeft) 
+        {
+            ik_target.weight = ik_target.weight.lerp(0.0, (time.delta_seconds() * 25.0).clamp(0.0, 1.0));
+            continue;
+        }
+
+        let (target_local_pos, target_weight, target_pole) = match combat_state {
+            CombatState::Idle => (Vec3::ZERO, 0.0, Vec3::new(1.0, -1.0, -1.0)),
+            CombatState::Windup { timer, .. }
+            | CombatState::Active { timer, .. }
+            | CombatState::Recovery { timer, .. } => {
+                let phase = match combat_state {
+                    CombatState::Windup { .. } => 0,
+                    CombatState::Active { .. } => 1,
+                    CombatState::Recovery { .. } => 2,
+                    _ => 0,
+                };
+                let progress = timer.fraction();
+
+                match attack_intent.current {
+                    AttackType::Thrust => match phase {
+                        0 => (
+                            Vec3::new(0.4, 0.4, 0.2).lerp(Vec3::new(0.4, 0.4, 0.8), progress),
+                            1.0,
+                            Vec3::new(1.0, 0.0, -1.0),
+                        ),
+                        1 => (
+                            Vec3::new(0.4, 0.4, 0.8).lerp(Vec3::new(0.0, 0.4, -1.5), progress),
+                            1.0,
+                            Vec3::new(1.0, 0.0, -1.0),
+                        ),
+                        2 => (
+                            Vec3::new(0.0, 0.4, -1.5).lerp(Vec3::ZERO, progress),
+                            1.0 - progress,
+                            Vec3::new(1.0, -1.0, -1.0),
+                        ),
+                        _ => (Vec3::ZERO, 0.0, Vec3::new(1.0, -1.0, -1.0)),
+                    },
+                    AttackType::LeftSwing => match phase {
+                        0 => (
+                            Vec3::new(-0.2, 0.6, 0.2).lerp(Vec3::new(-0.8, 0.7, 0.0), progress),
+                            1.0,
+                            Vec3::new(1.0, 1.0, 0.0),
+                        ),
+                        1 => (
+                            Vec3::new(-0.8, 0.7, 0.0).lerp(Vec3::new(1.0, 0.4, -0.8), progress),
+                            1.0,
+                            Vec3::new(1.0, 1.0, 0.0),
+                        ),
+                        2 => (
+                            Vec3::new(1.0, 0.4, -0.8).lerp(Vec3::ZERO, progress),
+                            1.0 - progress,
+                            Vec3::new(1.0, -1.0, -1.0),
+                        ),
+                        _ => (Vec3::ZERO, 0.0, Vec3::new(1.0, -1.0, -1.0)),
+                    },
+                    AttackType::RightSwing => match phase {
+                        0 => (
+                            Vec3::new(0.2, 0.6, 0.2).lerp(Vec3::new(1.0, 0.7, 0.0), progress),
+                            1.0,
+                            Vec3::new(1.0, 1.0, 0.0),
+                        ),
+                        1 => (
+                            Vec3::new(1.0, 0.7, 0.0).lerp(Vec3::new(-0.8, 0.4, -0.8), progress),
+                            1.0,
+                            Vec3::new(1.0, 1.0, 0.0),
+                        ),
+                        2 => (
+                            Vec3::new(-0.8, 0.4, -0.8).lerp(Vec3::ZERO, progress),
+                            1.0 - progress,
+                            Vec3::new(1.0, -1.0, -1.0),
+                        ),
+                        _ => (Vec3::ZERO, 0.0, Vec3::new(1.0, -1.0, -1.0)),
+                    },
+                    AttackType::Overhead => match phase {
+                        0 => (
+                            Vec3::new(0.2, 0.8, 0.2).lerp(Vec3::new(0.0, 1.6, 0.2), progress),
+                            1.0,
+                            Vec3::new(1.0, 1.0, -1.0),
+                        ),
+                        1 => (
+                            Vec3::new(0.0, 1.6, 0.2).lerp(Vec3::new(0.0, 0.1, -1.2), progress),
+                            1.0,
+                            Vec3::new(1.0, 1.0, -1.0),
+                        ),
+                        2 => (
+                            Vec3::new(0.0, 0.1, -1.2).lerp(Vec3::ZERO, progress),
+                            1.0 - progress,
+                            Vec3::new(1.0, -1.0, -1.0),
+                        ),
+                        _ => (Vec3::ZERO, 0.0, Vec3::new(1.0, -1.0, -1.0)),
+                    },
+                    AttackType::UnarmedLeft => match phase {
+                        0 => (
+                            Vec3::new(-0.4, 0.35, 0.0).lerp(Vec3::new(-0.75, 0.70, 0.35), progress),
+                            1.0,
+                            Vec3::new(-1.2, 0.8, 0.4),
+                        ),
+                        1 => (
+                            Vec3::new(-0.75, 0.70, 0.35).lerp(Vec3::new(0.35, 0.15, -1.05), progress),
+                            1.0,
+                            Vec3::new(-0.8, 0.3, -0.6),
+                        ),
+                        2 => (
+                            Vec3::new(0.35, 0.15, -1.05).lerp(Vec3::ZERO, progress),
+                            1.0 - progress,
+                            Vec3::new(-1.0, -0.4, -0.5),
+                        ),
+                        _ => (Vec3::ZERO, 0.0, Vec3::new(-1.0, 1.0, -1.0)),
+                    },
+                    AttackType::UnarmedRight => match phase {
+                        0 => (
+                            Vec3::new(0.4, 0.35, 0.0).lerp(Vec3::new(0.75, 0.70, 0.35), progress),
+                            1.0,
+                            Vec3::new(1.2, 0.8, 0.4),
+                        ),
+                        1 => (
+                            Vec3::new(0.75, 0.70, 0.35).lerp(Vec3::new(-0.35, 0.15, -1.05), progress),
+                            1.0,
+                            Vec3::new(0.8, 0.3, -0.6),
+                        ),
+                        2 => (
+                            Vec3::new(-0.35, 0.15, -1.05).lerp(Vec3::ZERO, progress),
+                            1.0 - progress,
+                            Vec3::new(1.0, -0.4, -0.5),
+                        ),
+                        _ => (Vec3::ZERO, 0.0, Vec3::new(1.0, 1.0, -1.0)),
+                    },
+                }
+            }
+            CombatState::Recoiled { timer } => (
+                Vec3::new(0.3, 0.8, 0.5),
+                1.0 - timer.fraction(),
+                Vec3::new(1.0, 0.0, 0.0),
+            ),
+        };
+
+        let lerp_factor = (time.delta_seconds() * 25.0).clamp(0.0, 1.0);
+        ik_target.weight = ik_target.weight.lerp(target_weight, lerp_factor);
+
+        if ik_target.weight > 0.01 {
+            ik_target.position = owner_transform.transform_point(target_local_pos);
+            chain.pole_vector = target_pole.normalize_or_zero();
+        }
+    }
+}
+
+pub fn maintain_shield_orientation(
+    owner_query: Query<(Entity, &IkTarget), With<GuardIntent>>,
+    anchor_query: Query<(Entity, &Parent), With<ShieldVisualAnchor>>,
+    mut transforms: Query<&mut Transform>,
+    parents: Query<&Parent>,
+) {
+    for (owner_entity, ik_target) in owner_query.iter() {
+        if ik_target.weight <= 0.01 {
+            continue;
+        }
+
+        let owner_global = compute_manual_global_transform(owner_entity, &transforms, &parents);
+
+        for (anchor_entity, anchor_parent) in anchor_query.iter() {
+            let mut current_entity = anchor_parent.get();
+            let mut found_owner = false;
+            while let Ok(p) = parents.get(current_entity) {
+                if current_entity == owner_entity {
+                    found_owner = true;
+                    break;
+                }
+                current_entity = p.get();
+            }
+
+            if found_owner || current_entity == owner_entity {
+                let root_global =
+                    compute_manual_global_transform(anchor_parent.get(), &transforms, &parents);
+                let base_shield_rot = Quat::from_euler(EulerRot::XYZ, 0.0, 3.0, 3.0);
+
+                let desired_global_rot = owner_global.rotation * base_shield_rot;
+                let target_local_rot = root_global.rotation.inverse() * desired_global_rot;
+
+                if let Ok(mut anchor_transform) = transforms.get_mut(anchor_entity) {
+                    let safe_weight = ik_target.weight.clamp(0.0, 1.0);
+                    anchor_transform.rotation = anchor_transform
+                        .rotation
+                        .slerp(target_local_rot, safe_weight);
+                }
+            }
+        }
+    }
+}
+
+pub fn update_shield_ik_target(
+    mut query: Query<(
+        &mut IkTarget,
+        &mut TwoBoneIkChain,
+        &GuardIntent,
+        &BlockingState,
+        &Transform,
+        Option<&Player>,
+    )>,
+    lock_on: Res<LockOnState>,
+    time: Res<Time>,
+) {
+    for (mut ik_target, mut chain, intent, state, transform, player_opt) in query.iter_mut() {
+        let is_guarding = if player_opt.is_some() {
+            lock_on.target.is_some() && matches!(*state, BlockingState::Blocking)
+        } else {
+            matches!(*state, BlockingState::Blocking)
+        };
+
+        let target_w = if is_guarding { 1.0 } else { 0.0 };
+        let lerp_factor = (time.delta_seconds() * 15.0).clamp(0.0, 1.0);
+        ik_target.weight = ik_target.weight.lerp(target_w, lerp_factor);
+
+        if ik_target.weight > 0.01 {
+            let local_base_pos = Vec3::new(-0.15, 0.3, -0.2);
+
+            let offset_x = intent.offset.x * 0.8;
+            let offset_y = -intent.offset.y * 0.8;
+            let offset_z = offset_x.abs() * 0.3;
+
+            let local_target = local_base_pos + Vec3::new(offset_x, offset_y, offset_z);
+            ik_target.position = transform.transform_point(local_target);
+
+            let local_pole = Vec3::new(-1.0, 0.0, 0.0);
+            chain.pole_vector = local_pole.normalize_or_zero();
+        }
+    }
+}
+
+fn compute_manual_global_transform(
+    entity: Entity,
+    transforms: &Query<&mut Transform>,
+    parents: &Query<&Parent>,
+) -> Transform {
+    let mut current_entity = entity;
+    let mut global_transform = Transform::IDENTITY;
+    let mut hierarchy = Vec::new();
+
+    while let Ok(transform) = transforms.get(current_entity) {
+        hierarchy.push(*transform);
+        if let Ok(parent) = parents.get(current_entity) {
+            current_entity = parent.get();
+        } else {
+            break;
+        }
+    }
+
+    for transform in hierarchy.into_iter().rev() {
+        global_transform = global_transform * transform;
+    }
+    global_transform
+}
+
+pub fn solve_two_bone_ik(
+    chain_query: Query<(&TwoBoneIkChain, &IkTarget)>,
+    mut transforms: Query<&mut Transform>,
+    parent_query: Query<&Parent>,
+) {
+    for (chain, target) in chain_query.iter() {
+        if target.weight <= 0.0 {
+            continue;
+        }
+
+        let len1 = transforms
+            .get(chain.mid)
+            .map(|t| t.translation.length())
+            .unwrap_or(0.001);
+        let len2 = transforms
+            .get(chain.tip)
+            .map(|t| t.translation.length())
+            .unwrap_or(0.001);
+        let total_len = len1 + len2;
+
+        let root_parent = parent_query
+            .get(chain.root)
+            .map(|p| p.get())
+            .unwrap_or(chain.root);
+        let root_parent_global =
+            compute_manual_global_transform(root_parent, &transforms, &parent_query);
+
+        let root_local = transforms.get(chain.root).cloned().unwrap_or_default();
+        let root_global_pos = (root_parent_global * root_local).translation;
+
+        let mut dir_target = target.position - root_global_pos;
+        let mut dist_target = dir_target.length();
+        let dir_target_norm = dir_target.normalize_or_zero();
+
+        let d_max = total_len * 0.95;
+
+        if dist_target > d_max {
+            let diff = dist_target - d_max;
+            let max_extend = total_len - d_max;
+            dist_target = d_max + max_extend * (1.0 - (-diff / max_extend).exp());
+        } else {
+            dist_target = dist_target.max(0.001);
+        }
+
+        let global_pole_vector = root_parent_global.rotation * chain.pole_vector;
+        let mut bend_normal = dir_target_norm
+            .cross(global_pole_vector)
+            .normalize_or_zero();
+
+        if bend_normal == Vec3::ZERO {
+            bend_normal = dir_target_norm.cross(Vec3::Y).normalize_or_zero();
+        }
+        if bend_normal == Vec3::ZERO {
+            bend_normal = dir_target_norm.cross(Vec3::X).normalize_or_zero();
+        }
+        if bend_normal == Vec3::ZERO {
+            bend_normal = Vec3::Z;
+        }
+
+        let mut cos_angle_root = ((len1 * len1) + (dist_target * dist_target) - (len2 * len2))
+            / (2.0 * len1 * dist_target);
+        if cos_angle_root.is_nan() {
+            cos_angle_root = 1.0;
+        }
+        let angle_root = cos_angle_root.clamp(-1.0, 1.0).acos();
+
+        let new_mid_dir = Quat::from_axis_angle(bend_normal, angle_root) * dir_target_norm;
+
+        let root_global_rot = (root_parent_global * root_local).rotation;
+
+        let default_bone_dir = transforms
+            .get(chain.mid)
+            .map(|t| t.translation.normalize_or_zero())
+            .unwrap_or(Vec3::Y);
+        let current_mid_global_dir = root_global_rot * default_bone_dir;
+
+        let root_rot_diff = Quat::from_rotation_arc(current_mid_global_dir, new_mid_dir);
+        let target_root_global_rot = root_rot_diff * root_global_rot;
+
+        let target_root_local_rot = root_parent_global.rotation.inverse() * target_root_global_rot;
+        let safe_weight = target.weight.clamp(0.0, 1.0);
+
+        if let Ok(mut root_transform) = transforms.get_mut(chain.root) {
+            root_transform.rotation = root_transform
+                .rotation
+                .slerp(target_root_local_rot, safe_weight);
+        }
+
+        let mut cos_angle_mid =
+            ((len1 * len1) + (len2 * len2) - (dist_target * dist_target)) / (2.0 * len1 * len2);
+        if cos_angle_mid.is_nan() {
+            cos_angle_mid = 1.0;
+        }
+        let angle_mid = cos_angle_mid.clamp(-1.0, 1.0).acos();
+
+        let bend_amount = std::f32::consts::PI - angle_mid;
+        let mid_local_rot = Quat::from_axis_angle(Vec3::X, bend_amount);
+        
+        if let Ok(mut mid_transform) = transforms.get_mut(chain.mid) {
+            let base_rot = mid_transform.rotation;
+            mid_transform.rotation = base_rot.slerp(mid_local_rot, safe_weight);
+        }
+    }
+}
+

@@ -1,0 +1,5 @@
+~/Downloads/FBX2glTF-linux-x64 -b -o idle.glb idle.fbx
+ bunu kullancan lan converter olarak
+ 
+ şimdilik full bizim ilk mankeni kullanıcam lan , diğerlerini 
+ ne yaptıysam olmadı , ellerini falan büyüttük lan haha.

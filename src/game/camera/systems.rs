@@ -1,6 +1,8 @@
 use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, PrimaryWindow};
+use bevy_rapier3d::prelude::*;
+
 use crate::game::common::components::MainCamera;
 use crate::game::player::components::Player;
 use crate::game::lock_on::components::LockOnState;
@@ -22,7 +24,7 @@ pub fn cursor_management(
     keys: Res<ButtonInput<KeyCode>>,
 ) {
     let Ok(mut window) = windows.get_single_mut() else { return };
-    
+
     // Ekrana tıklayınca fareyi kilitle
     if mouse.just_pressed(MouseButton::Left) {
         window.cursor.grab_mode = CursorGrabMode::Locked;
@@ -38,15 +40,17 @@ pub fn cursor_management(
 pub fn camera_controls(
     mut ev_motion: EventReader<MouseMotion>,
     mut camera_query: Query<(&mut Transform, &mut MainCamera)>,
-    player_query: Query<&Transform, (With<Player>, Without<MainCamera>)>,
+    player_query: Query<(Entity, &Transform), (With<Player>, Without<MainCamera>)>,
     windows: Query<&Window, With<PrimaryWindow>>,
     lock_on: Res<LockOnState>,
+    rapier_context: Res<RapierContext>, // Raycast için fizik bağlamı eklendi
 ) {
     if lock_on.target.is_some() {
-        return; 
+        return;
     }
+    
     let Ok(window) = windows.get_single() else { return };
-    let Ok(player_transform) = player_query.get_single() else { return };
+    let Ok((player_entity, player_transform)) = player_query.get_single() else { return };
     let Ok((mut cam_transform, mut cam_state)) = camera_query.get_single_mut() else { return };
 
     // Sadece fare kilitliyken kamerayı döndür
@@ -70,12 +74,37 @@ pub fn camera_controls(
     let rotation = Quat::from_axis_angle(Vec3::Y, cam_state.yaw)
         * Quat::from_axis_angle(Vec3::X, cam_state.pitch);
 
-    // Oyuncunun pozisyonuna offset (mesafe) ekle
-    let target_offset = rotation * Vec3::new(0.0, 0.0, cam_state.distance);
-    
     // Kameranın hedefini oyuncunun biraz yukarısı (gövdesi/kafası) olarak ayarla
     let look_target = player_transform.translation + Vec3::new(0.0, 1.0, 0.0);
     
-    cam_transform.translation = look_target + target_offset;
+    // Engeller olmasaydı kameranın durması gereken ideal mesafe ve yön
+    let ideal_offset = rotation * Vec3::new(0.0, 0.0, cam_state.distance);
+    let ray_direction = ideal_offset.normalize();
+    let max_distance = cam_state.distance;
+
+    // Raycast işlemi sırasında ışın oyuncunun içinden çıkacağı için oyuncu collider'ını görmezden geliyoruz
+    let filter = QueryFilter::new().exclude_collider(player_entity);
+
+    // Kameranın hedefine doğru ray atarak engelleri kontrol et
+    let final_distance = if let Some((_hit_entity, toi)) = rapier_context.cast_ray(
+        look_target,
+        ray_direction,
+        max_distance,
+        true, // solid = true (Kamera doğrudan collider'ların içine girmemeli)
+        filter
+    ) {
+        // Çarpışma tespit edildi (kamera duvarın arkasına geçiyor).
+        // Kameranın duvar yüzeyine yapışıp içine girmemesi için mesafeyi 0.2 birim kısalt.
+        // Karakterin modelinin içine tamamen girmemesi için de minimum 0.5 mesafe tut.
+        (toi - 0.2).max(0.5)
+    } else {
+        // Çarpışma yok, ideal uzaklığı kullan
+        max_distance
+    };
+
+    // Bulunan güvenli mesafeye göre asıl ofseti uygula
+    let actual_offset = ray_direction * final_distance;
+    
+    cam_transform.translation = look_target + actual_offset;
     cam_transform.look_at(look_target, Vec3::Y);
 }

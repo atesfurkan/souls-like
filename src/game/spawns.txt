@@ -1,0 +1,372 @@
+=== FILE: ./enemy/spawn.rs ===
+use super::components::{Enemy, EnemyAI, EnemyAIState};
+use crate::game::animation::components::{AnimationIntent, CharacterBones};
+use crate::game::combat::components::{
+    AttackIntent, CombatInput, CombatState, EquippedWeapon, GuardIntent, Hurtbox, LeftHand,
+    RightHand,
+};
+use crate::game::health::components::Health;
+use crate::game::ik::components::IkTarget;
+use crate::game::lock_on::components::Lockable;
+use crate::game::placement::components::{EnemySpawnVariant, Placement, PlacementKind, PlacementState};
+use crate::game::player::components::PendingEquipment;
+use crate::game::poise::components::Poise;
+use crate::game::shield::components::{BlockingState, EquippedShield};
+use crate::game::shield::data::{build_shield_hierarchy, get_shield_stats_bundle, ShieldType};
+use crate::game::weapon::components::WeaponType;
+use crate::game::weapon::data::{get_unarmed_config, get_weapon_data};
+use bevy::prelude::*;
+use bevy_rapier3d::prelude::*;
+
+pub fn spawn_enemy(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    asset_server: Res<AssetServer>,
+    mut placement_query: Query<(Entity, &Transform, &mut Placement)>,
+) {
+    let standard_character_scene = asset_server.load("models/character.glb#Scene0");
+    let monster_scene = asset_server.load("models/kolbuyuk.glb#Scene0");
+
+    for (_placement_entity, transform, mut placement) in placement_query.iter_mut() {
+        if placement.state != PlacementState::Active {
+            continue;
+        }
+
+        let (variant, is_boss) = match &placement.kind {
+            PlacementKind::Enemy(v) => {
+                let is_boss = *v == EnemySpawnVariant::BossArena;
+                (v.clone(), is_boss)
+            }
+            _ => continue,
+        };
+
+        placement.state = PlacementState::Consumed;
+
+        let mut position = transform.translation;
+        position.y += 0.5;
+
+        info!(
+            "Gerçek düşman entity'si fizik ve model ile yaratılıyor! Tip: {:?}, Pozisyon: {:?}",
+            variant, position
+        );
+
+        let enemy_entity = commands.spawn_empty().id();
+
+        let (mut hp, mut poise, speed, detect, attack_range, opt_weapon_type, shield_type, cooldown) =
+            match variant {
+                EnemySpawnVariant::LightSpearman => {
+                    (80.0, 20.0, 1.5, 15.0, 2.5, Some(WeaponType::Spear), None, 1.0)
+                }
+                EnemySpawnVariant::Vanguard => (
+                    120.0,
+                    50.0,
+                    1.0,
+                    12.0,
+                    1.5,
+                    Some(WeaponType::VampireBlade),
+                    Some(ShieldType::KiteShield),
+                    1.5,
+                ),
+                EnemySpawnVariant::HeavyDefender | EnemySpawnVariant::BossArena => (
+                    200.0,
+                    100.0,
+                    0.6,
+                    10.0,
+                    1.5,
+                    Some(WeaponType::VampireBlade),
+                    Some(ShieldType::TowerShield),
+                    2.5,
+                ),
+                EnemySpawnVariant::UnarmedMonster => {
+                    (160.0, 80.0, 1.8, 14.0, 1.8, None, None, 1.2)
+                }
+            };
+
+        let mut final_scale = transform.scale;
+        if is_boss {
+            hp *= 2.5;
+            poise *= 2.0;
+            final_scale *= 1.3;
+        }
+
+        let selected_scene = match variant {
+            EnemySpawnVariant::UnarmedMonster => monster_scene.clone(),
+            _ => standard_character_scene.clone(),
+        };
+
+        let mut entity_commands = commands.entity(enemy_entity);
+
+        entity_commands
+            .insert((
+                SpatialBundle {
+                    transform: Transform::from_translation(position).with_scale(final_scale),
+                    ..default()
+                },
+                Enemy,
+                Lockable,
+                Health::new(hp),
+                Poise {
+                    current: poise,
+                    max: poise,
+                    ..default()
+                },
+                Hurtbox { owner: enemy_entity },
+                EnemyAIState::Idle,
+                EnemyAI {
+                    detection_range: detect,
+                    attack_range: attack_range,
+                    speed,
+                    attack_cooldown: Timer::from_seconds(cooldown, TimerMode::Once),
+                },
+            ))
+            .insert((
+                CombatState::default(),
+                AttackIntent::default(),
+                CombatInput::default(),
+                GuardIntent::default(),
+                RigidBody::Dynamic,
+                Velocity::default(),
+                Collider::capsule_y(0.6, 0.6),
+                LockedAxes::ROTATION_LOCKED,
+                CharacterBones::default(),
+                AnimationIntent::default(),
+                IkTarget {
+                    position: Vec3::ZERO,
+                    weight: 0.0,
+                },
+                BlockingState::Idle,
+            ));
+
+        if let Some(w_type) = opt_weapon_type {
+            entity_commands.insert(get_weapon_data(w_type));
+        } else {
+            entity_commands.insert(get_unarmed_config());
+        }
+
+        entity_commands.with_children(|parent| {
+            parent.spawn(SceneBundle {
+                scene: selected_scene,
+                transform: Transform::from_xyz(0.0, -1.0, 0.0)
+                    .with_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
+                ..default()
+            });
+
+            if opt_weapon_type.is_some() {
+                parent.spawn((
+                    SpatialBundle {
+                        transform: Transform::from_xyz(0.0, 0.0, 0.0)
+                            .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_4)),
+                        ..default()
+                    },
+                    EquippedWeapon,
+                    IkTarget {
+                        position: Vec3::ZERO,
+                        weight: 0.0,
+                    },
+                    PendingEquipment,
+                ));
+            } else {
+                parent.spawn((
+                    RightHand,
+                    SpatialBundle {
+                        transform: Transform::from_xyz(0.4, 1.0, 0.4),
+                        ..default()
+                    },
+                    IkTarget {
+                        position: Vec3::ZERO,
+                        weight: 0.0,
+                    },
+                ));
+
+                parent.spawn((
+                    LeftHand,
+                    SpatialBundle {
+                        transform: Transform::from_xyz(-0.4, 1.0, 0.4),
+                        ..default()
+                    },
+                    IkTarget {
+                        position: Vec3::ZERO,
+                        weight: 0.0,
+                    },
+                ));
+            }
+        });
+
+        if let Some(s_type) = shield_type {
+            commands
+                .entity(enemy_entity)
+                .insert((get_shield_stats_bundle(s_type),))
+                .with_children(|parent| {
+                    parent
+                        .spawn((
+                            SpatialBundle {
+                                transform: Transform::from_rotation(Quat::from_rotation_z(
+                                    std::f32::consts::PI,
+                                )),
+                                ..default()
+                            },
+                            EquippedShield,
+                            PendingEquipment,
+                            s_type,
+                        ))
+                        .with_children(|shield_root| {
+                            build_shield_hierarchy(
+                                shield_root,
+                                s_type,
+                                enemy_entity,
+                                &mut meshes,
+                                &mut materials,
+                            );
+                        });
+                });
+        }
+    }
+}
+=== FILE: ./objects/spawn.rs ===
+use bevy::prelude::*;
+use crate::game::placement::components::{Placement, PlacementKind, PlacementState, ObjectSpawnVariant};
+use crate::game::world::analysis::components::SurfaceType;
+use super::chest::build_chest;
+use super::stalactite::build_stalactite;
+use super::tree::build_tree;
+
+pub fn spawn_objects(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut placement_query: Query<(Entity, &Transform, &mut Placement)>,
+) {
+    for (_placement_entity, transform, mut placement) in placement_query.iter_mut() {
+        if placement.state != PlacementState::Active {
+            continue;
+        }
+
+        let variant = match &placement.kind {
+            PlacementKind::Object(v) => v.clone(),
+            _ => continue,
+        };
+
+        placement.state = PlacementState::Consumed;
+
+        let position = transform.translation;
+        let normal = placement.normal;
+        let surface_type = placement.surface_type;
+
+        match variant {
+            ObjectSpawnVariant::Chest => {
+                if surface_type == SurfaceType::Floor {
+                    build_chest(&mut commands, position, normal, &mut meshes, &mut materials);
+                }
+            }
+            ObjectSpawnVariant::Stalactite => {
+                if surface_type == SurfaceType::Ceiling {
+                    build_stalactite(&mut commands, position, normal, &mut meshes, &mut materials);
+                }
+            }
+            ObjectSpawnVariant::Tree => {
+                // Ağacın semantik yerleşme kuralı
+                if surface_type == SurfaceType::Floor {
+                    build_tree(&mut commands, position, normal, &mut meshes, &mut materials);
+                }
+            }
+        }
+    }
+}
+=== FILE: ./player/spawn.rs ===
+use bevy::prelude::*;
+use bevy_rapier3d::prelude::*;
+
+use super::components::{
+    PendingColliderFit, Player, PlayerInventory, PlayerState,
+};
+use crate::game::animation::components::{AnimationIntent, CharacterBones};
+use crate::game::combat::components::{
+    AttackIntent, CombatInput, CombatState, GuardIntent, Hurtbox, LeftHand, RightHand,
+};
+use crate::game::health::components::Health;
+use crate::game::ik::components::IkTarget;
+use crate::game::shield::components::BlockingState;
+use crate::game::shield::data::ShieldType;
+use crate::game::stamina::components::Stamina;
+use crate::game::weapon::components::WeaponType;
+use crate::game::weapon::data::get_unarmed_config;
+
+#[derive(Component)]
+pub struct SpawnPointPlayer;
+
+pub fn spawn_player(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    spawn_point_query: Query<&Transform, With<SpawnPointPlayer>>,
+) {
+    let player_entity = commands.spawn_empty().id();
+    let character_scene = asset_server.load("models/character.glb#Scene0");
+
+    let spawn_transform = if let Ok(sp_transform) = spawn_point_query.get_single() {
+        Transform::from_translation(sp_transform.translation + Vec3::new(0.0, 50.0, 0.0))
+    } else {
+        Transform::from_xyz(0.0, 50.0, 0.0)
+    };
+
+    commands
+        .entity(player_entity)
+        .insert((
+            Player,
+            PendingColliderFit,
+            SpatialBundle {
+                transform: spawn_transform,
+                ..default()
+            },
+            PlayerInventory {
+                weapons: vec![None, Some(WeaponType::Spear), Some(WeaponType::VampireBlade)],
+                shields: vec![None, Some(ShieldType::Buckler), Some(ShieldType::KiteShield)],
+            },
+            PlayerState::default(),
+            Health::new(100.0),
+            Stamina::default(),
+        ))
+        .insert((
+            CombatInput::default(),
+            CombatState::default(),
+            AttackIntent::default(),
+            GuardIntent::default(),
+            Hurtbox { owner: player_entity },
+            IkTarget { position: Vec3::ZERO, weight: 0.0 },
+            BlockingState::Idle,
+        ))
+        .insert((
+            AnimationIntent::default(),
+            CharacterBones::default(),
+        ))
+        .insert((
+            RigidBody::KinematicPositionBased,
+            Collider::capsule_y(0.5, 0.5),
+            KinematicCharacterController::default(),
+            get_unarmed_config(),
+        ))
+        .with_children(|parent| {
+            parent.spawn(SceneBundle {
+                scene: character_scene,
+                transform: Transform::from_xyz(0.0, -1.0, 0.0)
+                    .with_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
+                ..default()
+            });
+
+            parent.spawn((
+                RightHand,
+                SpatialBundle {
+                    transform: Transform::from_xyz(0.4, 1.0, 0.4),
+                    ..default()
+                },
+            ));
+
+            parent.spawn((
+                LeftHand,
+                SpatialBundle {
+                    transform: Transform::from_xyz(-0.4, 1.0, 0.4),
+                    ..default()
+                },
+            ));
+        });
+}

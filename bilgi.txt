@@ -1,1 +1,176 @@
-manken deniyom lan burada , oyun kodalarını srca yaptım
+olm chatgpt nin yazdığı prompta bak bir de gemininin yazdığı prompta bak lan
+gpt:
+# Sprint — World Event Architecture
+
+## IMPORTANT
+
+Bu sprintte amaç World modülünü dış modüllere bağlamak değildir.
+
+Amaç, World modülünün procedural olarak ürettiği `WorldData` ve world planlarından dış sistemlere bilgi aktarabilmesi için doğru event mimarisini oluşturmaktır.
+
+Kod yazmaya başlamadan önce mevcut World modülünü ve mevcut event yapısını analiz et.
+
+---
+
+## Context
+
+World modülü artık procedural olarak dünya verisi üretebilmektedir.
+
+World generation pipeline;
+
+* terrain
+* biome
+* navigation
+* forest
+* road
+* river
+* cave
+* encounter
+* trap
+* ranged
+* reward
+* difficulty
+
+gibi planlama katmanlarından oluşmaktadır.
+
+Ancak World modülü henüz dış gameplay modülleriyle temiz ve genişletilebilir bir event tabanlı iletişim mimarisine sahip değildir.
+
+---
+
+## Sprint Amacı
+
+World modülü;
+
+dış modüllere doğrudan bağımlı olmadan,
+
+oluşturduğu world sonuçlarını event tabanlı şekilde yayınlayabilmelidir.
+
+---
+
+## Mimari Kurallar
+
+World modülü;
+
+* Enemy modülünü import etmemelidir.
+* Combat modülünü import etmemelidir.
+* Weapon modülünü import etmemelidir.
+* Trap gameplay implementasyonunu içermemelidir.
+* Ranged gameplay implementasyonunu içermemelidir.
+* Equipment veya Loot sistemini implement etmemelidir.
+
+World yalnızca world bilgisini üretmeli ve ilgili eventleri yayınlamalıdır.
+
+---
+
+## Event Tasarım İlkeleri
+
+Eventler;
+
+World modülünün ne yaptığını değil,
+
+dış modüllerin hangi world bilgisini bilmesi gerektiğini temsil etmelidir.
+
+Event tasarlarken şu soruları analiz et:
+
+* World hangi olayları dışarıya bildirmelidir?
+* Hangi bilgiler event payload'ında bulunmalıdır?
+* Hangi bilgiler dış modüller tarafından world verisinden tekrar bulunabilir?
+* Event ne zaman yayınlanmalıdır?
+* World generation sırasında mı?
+* WorldData oluşturulduğunda mı?
+* Runtime world spawn aşamasında mı?
+
+---
+
+## ÖNEMLİ
+
+Her plan için otomatik olarak event oluşturma.
+
+Gereksiz event üretme.
+
+Önce mevcut mimariyi analiz et ve gerçekten dış iletişim gerektiren world olaylarını belirle.
+
+---
+
+## Kod Yazmadan Önce
+
+Önce mimari analizini açıkla.
+
+Özellikle şunları belirt:
+
+1. Mevcut event yapısının eksikleri
+2. Gerekli event kategorileri
+3. Her eventin sorumluluğu
+4. Eventlerin hangi lifecycle aşamasında yayınlanacağı
+5. World modülünün hangi dış modüllere doğrudan bağımlı olmaması gerektiği
+
+Analizi tamamlamadan implementasyona başlama.
+
+---
+
+## Implementasyon
+
+Analizden sonra yalnızca gerekli event altyapısını implement et.
+
+Mevcut WorldData ve procedural pipeline'ı yeniden yazma.
+
+Mevcut generator'ları yeniden yazma.
+
+Event sistemini dış gameplay modüllerini import ederek implement etme.
+
+---
+
+## Bu Sprintte Yapılmayacaklar
+
+* Enemy integration
+* Combat integration
+* Trap gameplay
+* Ranged combat
+* Loot generation
+* Equipment integration
+* Runtime spawn sistemleri
+
+---
+
+## Beklenen Çıktılar
+
+1. Event Architecture Analysis
+2. Event Lifecycle Kararları
+3. Event Listesi ve Sorumlulukları
+4. Kod Değişiklikleri
+5. Manual Test Checklist
+6. Regression Checklist
+
+Amaç; World modülünün dış sistemlerle ileride temiz şekilde iletişim kurabilmesi için sade, event tabanlı ve genişletilebilir bir iletişim altyapısı oluşturmaktır.
+
+#############################################################################
+gemini:
+
+Sen bir Rust ve Bevy uzmanısın. Oyunumun world (prosedürel üretim) modülü ile dış modüller (enemy, trap, item) arasındaki iletişimi sağlamak için 'Event-Driven Spawning' mimarisi kuruyoruz.
+
+Görevin:
+
+    src/game/world/events.rs dosyasının içine (mevcut kodları silmeden) şu Event struct'larını ekle:
+
+        SpawnEnemyRequest { position: Vec3, enemy_tier: u8, is_ranged: bool }
+
+        SpawnTrapRequest { position: Vec3, trap_type: String, damage: f32 }
+
+        SpawnRewardRequest { position: Vec3, reward_tier: u8 }
+
+    src/game/world/plugin.rs içindeki WorldPlugin'in build metoduna bu eventleri kaydet (app.add_event::<...>()).
+    Sadece bu iki dosyanın değişmiş kodlarını ver. Mantığı değiştirme
+
+
+///////////////////////////////////////////////////////////////////////////////////////
+\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
+
+cave generator yapıcaz lan , bu nedenle bizim src'nin adını srca yapıyom , src içine mağara üretim kodları yazıyom
+
+
+
+
+
+
+
+

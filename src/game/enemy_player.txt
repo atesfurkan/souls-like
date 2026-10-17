@@ -1,0 +1,1279 @@
+=== FILE: enemy/plugin.rs ===
+use bevy::prelude::*;
+use super::systems::enemy_ai_system;
+use super::spawn::{spawn_enemy, spawn_test_enemies};
+use crate::game::common::systems::setup_anatomical_hurtboxes;
+
+pub struct EnemyPlugin;
+
+impl Plugin for EnemyPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Startup, spawn_test_enemies) // YENİ: Başlangıçta test düşmanlarını haritaya koyar
+           .add_systems(Update, spawn_enemy)
+           .add_systems(Update, enemy_ai_system)
+           .add_systems(Update, setup_anatomical_hurtboxes);
+    }
+}
+=== FILE: enemy/spawn.rs ===
+use super::components::{Enemy, EnemyAI, EnemyAIState};
+use crate::game::animation::components::{AnimationIntent, CharacterBones};
+use crate::game::combat::components::{
+    AttackIntent, CombatInput, CombatState, EquippedWeapon, GuardIntent, LeftHand,
+    RightHand,
+};
+use crate::game::health::components::Health;
+use crate::game::ik::components::IkTarget;
+use crate::game::lock_on::components::Lockable;
+use crate::game::placement::components::{EnemySpawnVariant, Placement, PlacementKind, PlacementState};
+use crate::game::player::components::PendingEquipment;
+use crate::game::poise::components::Poise;
+use crate::game::shield::components::{BlockingState, EquippedShield};
+use crate::game::shield::data::{build_shield_hierarchy, get_shield_stats_bundle, ShieldType};
+use crate::game::weapon::components::WeaponType;
+use crate::game::weapon::data::{get_unarmed_config, get_weapon_data};
+use crate::game::common::components::{HurtboxProfile, HUMAN_PROXIES};
+use bevy::prelude::*;
+use bevy_rapier3d::prelude::*;
+
+pub fn spawn_test_enemies(mut commands: Commands) {
+    let test_positions = [
+        Vec3::new(4.0, 20.0, 4.0),   // Sağ-Ön
+        Vec3::new(-4.0, 20.0, 4.0),  // Sol-Ön
+        Vec3::new(0.0, 20.0, 6.0),   // Tam Ön
+    ];
+
+    let variants = [
+        EnemySpawnVariant::LightSpearman,
+        EnemySpawnVariant::Vanguard,
+        EnemySpawnVariant::UnarmedMonster,
+    ];
+
+    for (i, pos) in test_positions.iter().enumerate() {
+        commands.spawn((
+            SpatialBundle {
+                transform: Transform::from_translation(*pos),
+                ..default()
+            },
+            Placement {
+                kind: PlacementKind::Enemy(variants[i % variants.len()].clone()),
+                state: PlacementState::Active,
+                // DERLEME HATASINI ÇÖZEN KISIM: Eksik kalan chunk_coord, normal vb. alanları varsayılan değerlerle doldur
+                ..default()
+            },
+        ));
+    }
+    
+    info!("Test düşmanları oyuncunun (0, 20, 0) çevresinde Placement olarak oluşturuldu!");
+}
+
+pub fn spawn_enemy(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    asset_server: Res<AssetServer>,
+    mut placement_query: Query<(Entity, &GlobalTransform, &mut Placement)>,
+) {
+    let character_scene = asset_server.load("models/proxyfull.glb#Scene0");
+
+    for (placement_entity, global_transform, mut placement) in placement_query.iter_mut() {
+        if placement.state != PlacementState::Active {
+            continue;
+        }
+
+        let transform = global_transform.compute_transform();
+        
+        info!(
+            "Aktif Placement bulundu! Entity: {:?}, Dünya Pozisyonu: {:?}, Tür: {:?}", 
+            placement_entity, transform.translation, placement.kind
+        );
+
+        let (variant, is_boss) = match &placement.kind {
+            PlacementKind::Enemy(v) => {
+                let is_boss = *v == EnemySpawnVariant::BossArena;
+                (v.clone(), is_boss)
+            }
+            _ => {
+                warn!(
+                    "Placement {:?} bir Enemy değil, atlanıyor. Tür: {:?}", 
+                    placement_entity, placement.kind
+                );
+                continue;
+            }
+        };
+
+        placement.state = PlacementState::Consumed;
+
+        let mut position = transform.translation;
+        
+        position.y += 2.5;
+
+        let enemy_entity = commands.spawn_empty().id();
+
+        let (mut hp, mut poise, speed, detect, attack_range, opt_weapon_type, shield_type, cooldown) =
+            match variant {
+                EnemySpawnVariant::LightSpearman => {
+                    (80.0, 20.0, 1.5, 15.0, 2.5, Some(WeaponType::Spear), None, 1.0)
+                }
+                EnemySpawnVariant::Vanguard => (
+                    120.0,
+                    50.0,
+                    1.0,
+                    12.0,
+                    1.5,
+                    Some(WeaponType::VampireBlade),
+                    Some(ShieldType::KiteShield),
+                    1.5,
+                ),
+                EnemySpawnVariant::HeavyDefender | EnemySpawnVariant::BossArena => (
+                    200.0,
+                    100.0,
+                    0.6,
+                    10.0,
+                    1.5,
+                    Some(WeaponType::VampireBlade),
+                    Some(ShieldType::TowerShield),
+                    2.5,
+                ),
+                EnemySpawnVariant::UnarmedMonster => {
+                    (160.0, 80.0, 1.8, 14.0, 1.8, None, None, 1.2)
+                }
+            };
+
+        let mut final_scale = transform.scale;
+        if is_boss {
+            hp *= 2.5;
+            poise *= 2.0;
+            final_scale *= 1.3;
+        }
+
+        info!(
+            "Düşman spawn ediliyor -> Entity ID: {:?}, Tip: {:?}, HP: {}, Güvenli Pozisyon: {:?}",
+            enemy_entity, variant, hp, position
+        );
+
+        let mut entity_commands = commands.entity(enemy_entity);
+
+        entity_commands.insert((
+            SpatialBundle {
+                transform: Transform::from_translation(position).with_scale(final_scale),
+                ..default()
+            },
+            Enemy,
+            Lockable,
+            Health::new(hp),
+            Poise {
+                current: poise,
+                max: poise,
+                ..default()
+            },
+            EnemyAIState::Idle,
+            EnemyAI {
+                detection_range: detect,
+                attack_range: attack_range,
+                speed,
+                attack_cooldown: Timer::from_seconds(cooldown, TimerMode::Once),
+            },
+        ));
+
+        entity_commands.insert(HurtboxProfile { proxies: HUMAN_PROXIES });
+
+        entity_commands.insert((
+            CombatState::default(),
+            AttackIntent::default(),
+            CombatInput::default(),
+            GuardIntent::default(),
+            RigidBody::Dynamic,
+            Velocity::default(),
+            Collider::capsule_y(0.6, 0.2),
+            LockedAxes::ROTATION_LOCKED,
+            CharacterBones::default(),
+            AnimationIntent::default(),
+            IkTarget {
+                position: Vec3::ZERO,
+                weight: 0.0,
+            },
+            BlockingState::Idle,
+        ));
+
+        if let Some(w_type) = opt_weapon_type {
+            entity_commands.insert(get_weapon_data(w_type));
+            info!("Düşman {:?} silahı ile donatıldı.", w_type);
+        } else {
+            entity_commands.insert(get_unarmed_config());
+            info!("Düşman silahsız (Unarmed) olarak donatıldı.");
+        }
+
+        entity_commands.with_children(|parent| {
+            parent.spawn(SceneBundle {
+                scene: character_scene.clone(),
+                transform: Transform::from_xyz(0.0, -1.0, 0.0)
+                    .with_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
+                ..default()
+            });
+
+            if opt_weapon_type.is_some() {
+                parent.spawn((
+                    SpatialBundle {
+                        transform: Transform::from_xyz(0.0, 0.0, 0.0)
+                            .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_4)),
+                        ..default()
+                    },
+                    EquippedWeapon,
+                    IkTarget {
+                        position: Vec3::ZERO,
+                        weight: 0.0,
+                    },
+                    PendingEquipment,
+                ));
+            } else {
+                parent.spawn((
+                    RightHand,
+                    SpatialBundle {
+                        transform: Transform::from_xyz(0.4, 1.0, 0.4),
+                        ..default()
+                    },
+                    IkTarget {
+                        position: Vec3::ZERO,
+                        weight: 0.0,
+                    },
+                ));
+
+                parent.spawn((
+                    LeftHand,
+                    SpatialBundle {
+                        transform: Transform::from_xyz(-0.4, 1.0, 0.4),
+                        ..default()
+                    },
+                    IkTarget {
+                        position: Vec3::ZERO,
+                        weight: 0.0,
+                    },
+                ));
+            }
+        });
+
+        if let Some(s_type) = shield_type {
+            info!("Düşman {:?} kalkanı ile donatıldı.", s_type);
+            commands
+                .entity(enemy_entity)
+                .insert((get_shield_stats_bundle(s_type),))
+                .with_children(|parent| {
+                    parent
+                        .spawn((
+                            SpatialBundle {
+                                transform: Transform::from_rotation(Quat::from_rotation_z(
+                                    std::f32::consts::PI,
+                                )),
+                                ..default()
+                            },
+                            EquippedShield,
+                            PendingEquipment,
+                            s_type,
+                        ))
+                        .with_children(|shield_root| {
+                            build_shield_hierarchy(
+                                shield_root,
+                                s_type,
+                                enemy_entity,
+                                &mut meshes,
+                                &mut materials,
+                            );
+                        });
+                });
+        }
+        
+        info!("Düşman Entity {:?} başarıyla oluşturuldu.", enemy_entity);
+    }
+}
+=== FILE: enemy/mod.rs ===
+pub mod components;
+pub mod plugin;
+pub mod systems;
+pub mod spawn;
+=== FILE: enemy/components.rs ===
+use bevy::prelude::*;
+
+#[derive(Component)]
+pub struct Enemy;
+
+// Stagger durumu kaldırıldı, ortak CombatState veya Poise sistemi bunu yönetecek.
+#[derive(Component, Default, PartialEq, Eq, Clone, Copy, Debug)]
+pub enum EnemyAIState {
+    #[default]
+    Idle,
+    Chase,
+    Attack,
+    Dead,
+}
+
+// StaggerState struct'ı tamamen silindi.
+
+#[derive(Component)]
+pub struct EnemyAI {
+    pub detection_range: f32,
+    pub attack_range: f32,
+    pub speed: f32,
+    pub attack_cooldown: Timer,
+}
+=== FILE: enemy/systems.rs ===
+use super::components::{Enemy, EnemyAI, EnemyAIState};
+use crate::game::animation::components::AnimationIntent;
+use crate::game::combat::components::{
+    AttackIntent, CombatInput, CombatState, GuardIntent, UnarmedConfig,
+};
+use crate::game::health::components::Health;
+use crate::game::player::components::Player;
+use crate::game::shield::components::BlockingState;
+use crate::game::weapon::components::{AttackType, Weapon};
+use bevy::prelude::*;
+use bevy_rapier3d::prelude::*;
+
+pub fn enemy_ai_system(
+    time: Res<Time>,
+    player_query: Query<&Transform, With<Player>>,
+    mut enemy_query: Query<
+        (
+            Entity,
+            &mut Transform,
+            &mut Velocity,
+            &mut EnemyAI,
+            &mut EnemyAIState,
+            &mut CombatState,
+            &mut CombatInput,
+            Option<&mut BlockingState>,
+            Option<&mut GuardIntent>,
+            Option<&Weapon>,
+            Option<&UnarmedConfig>,
+            &Health,
+            &mut AnimationIntent,
+            &mut AttackIntent,
+        ),
+        (With<Enemy>, Without<Player>),
+    >,
+) {
+    let Ok(player_transform) = player_query.get_single() else {
+        return;
+    };
+    let player_pos = player_transform.translation;
+
+    for (
+        entity,
+        mut transform,
+        mut velocity,
+        mut ai,
+        mut ai_state,
+        mut combat_state,
+        mut combat_input,
+        mut opt_blocking_state,
+        mut opt_guard_intent,
+        weapon_opt,
+        unarmed_opt,
+        health,
+        mut animation_intent,
+        mut attack_intent,
+    ) in enemy_query.iter_mut()
+    {
+        ai.attack_cooldown.tick(time.delta());
+
+        if health.current <= 0.0 {
+            *ai_state = EnemyAIState::Dead;
+            velocity.linvel.x = 0.0;
+            velocity.linvel.z = 0.0;
+            animation_intent.is_moving = false;
+            animation_intent.is_attacking = false;
+            continue;
+        }
+
+        if matches!(*combat_state, CombatState::Recoiled { .. }) {
+            velocity.linvel.x = 0.0;
+            velocity.linvel.z = 0.0;
+            if let Some(mut blocking_state) = opt_blocking_state.as_deref_mut() {
+                *blocking_state = BlockingState::Idle;
+            }
+            animation_intent.is_moving = false;
+            animation_intent.is_attacking = false;
+            continue;
+        }
+
+        let enemy_pos = transform.translation;
+        let distance = enemy_pos.distance(player_pos);
+        let mut direction = player_pos - enemy_pos;
+        direction.y = 0.0;
+        let direction_flat = direction.normalize_or_zero();
+
+        let random_hash =
+            ((time.elapsed_seconds() * 10.0) as usize + entity.index() as usize) % 100;
+        let t = time.elapsed_seconds() + entity.index() as f32;
+
+        if let (Some(blocking_state), Some(guard_intent)) = (
+            opt_blocking_state.as_deref_mut(),
+            opt_guard_intent.as_deref_mut(),
+        ) {
+            let shield_x_offset = (t * 2.0).sin() * 0.4;
+            let shield_y_offset = (t * 3.0).cos() * 0.4;
+
+            if matches!(*blocking_state, BlockingState::Blocking) {
+                guard_intent.offset = Vec2::new(shield_x_offset, shield_y_offset);
+            } else {
+                guard_intent.offset = guard_intent.offset.lerp(Vec2::ZERO, 0.1);
+            }
+        }
+
+        match *ai_state {
+            EnemyAIState::Idle => {
+                velocity.linvel.x = 0.0;
+                velocity.linvel.z = 0.0;
+                if distance <= ai.detection_range {
+                    *ai_state = EnemyAIState::Chase;
+                }
+            }
+            EnemyAIState::Chase => {
+                if let Some(mut blocking_state) = opt_blocking_state.as_deref_mut() {
+                    if random_hash < 40 {
+                        *blocking_state = BlockingState::Blocking;
+                    } else {
+                        *blocking_state = BlockingState::Idle;
+                    }
+                }
+
+                if distance > ai.detection_range {
+                    *ai_state = EnemyAIState::Idle;
+                    velocity.linvel.x = 0.0;
+                    velocity.linvel.z = 0.0;
+                } else if distance <= ai.attack_range {
+                    *ai_state = EnemyAIState::Attack;
+                    velocity.linvel.x = 0.0;
+                    velocity.linvel.z = 0.0;
+                } else {
+                    // DÜZELTME: Sadece X ve Z hızını ayarlıyoruz. 
+                    // Y hızına hiç dokunmadığımız için Rapier'in yerçekimi hesaplamaları korunur!
+                    let movement_vel = direction_flat * ai.speed;
+                    velocity.linvel.x = movement_vel.x;
+                    velocity.linvel.z = movement_vel.z;
+                    
+                    let target_look = Vec3::new(player_pos.x, enemy_pos.y, player_pos.z);
+                    transform.look_at(target_look, Vec3::Y);
+                }
+            }
+            EnemyAIState::Attack => {
+                velocity.linvel.x = 0.0;
+                velocity.linvel.z = 0.0;
+
+                if let Some(mut blocking_state) = opt_blocking_state.as_deref_mut() {
+                    *blocking_state = BlockingState::Idle;
+                }
+
+                let target_look = Vec3::new(player_pos.x, enemy_pos.y, player_pos.z);
+                transform.look_at(target_look, Vec3::Y);
+
+                if distance > ai.attack_range && matches!(*combat_state, CombatState::Idle) {
+                    *ai_state = EnemyAIState::Chase;
+                } else if matches!(*combat_state, CombatState::Idle)
+                    && ai.attack_cooldown.finished()
+                {
+                    if let Some(weapon) = weapon_opt {
+                        let attacks: Vec<_> = weapon.attacks.keys().collect();
+                        if !attacks.is_empty() {
+                            let rand_index = random_hash % attacks.len();
+                            let chosen_attack = *attacks[rand_index];
+
+                            if let Some(attack_def) = weapon.attacks.get(&chosen_attack) {
+                                combat_input.attack_held = random_hash % 2 == 0;
+                                *combat_state = CombatState::Windup {
+                                    timer: Timer::from_seconds(
+                                        attack_def.windup_duration,
+                                        TimerMode::Once,
+                                    ),
+                                    charge_timer: Timer::from_seconds(
+                                        attack_def.max_charge_duration,
+                                        TimerMode::Once,
+                                    ),
+                                    attack_type: chosen_attack,
+                                };
+                                attack_intent.current = chosen_attack;
+                                ai.attack_cooldown.reset();
+                            }
+                        }
+                    } else if let Some(unarmed) = unarmed_opt {
+                        let chosen_attack = if random_hash % 2 == 0 {
+                            AttackType::UnarmedRight
+                        } else {
+                            AttackType::UnarmedLeft
+                        };
+
+                        if let Some(attack_def) = unarmed.attacks.get(&chosen_attack) {
+                            combat_input.attack_held = false;
+                            *combat_state = CombatState::Windup {
+                                timer: Timer::from_seconds(
+                                    attack_def.windup_duration,
+                                    TimerMode::Once,
+                                ),
+                                charge_timer: Timer::from_seconds(
+                                    attack_def.max_charge_duration,
+                                    TimerMode::Once,
+                                ),
+                                attack_type: chosen_attack,
+                            };
+                            attack_intent.current = chosen_attack;
+                            ai.attack_cooldown.reset();
+                        }
+                    }
+                } else if let CombatState::Windup { .. } = *combat_state {
+                    if combat_input.attack_held && random_hash < 5 {
+                        combat_input.attack_held = false;
+                    }
+                }
+            }
+            EnemyAIState::Dead => {
+                velocity.linvel.x = 0.0;
+                velocity.linvel.z = 0.0;
+                if let Some(mut blocking_state) = opt_blocking_state.as_deref_mut() {
+                    *blocking_state = BlockingState::Idle;
+                }
+            }
+        }
+
+        animation_intent.is_moving = velocity.linvel.length_squared() > 0.1;
+        animation_intent.is_sprinting = false;
+        animation_intent.is_attacking = !matches!(*combat_state, CombatState::Idle);
+
+        if let Some(blocking_state) = opt_blocking_state.as_deref() {
+            animation_intent.is_blocking = matches!(*blocking_state, BlockingState::Blocking);
+        } else {
+            animation_intent.is_blocking = false;
+        }
+    }
+}
+=== FILE: player/plugin.rs ===
+use bevy::prelude::*;
+
+use super::components::{PlayerCombatConfig, PlayerMovementConfig};
+use super::spawn::spawn_player;
+use super::systems::{
+    combat::{handle_shield_swap_input, handle_weapon_swap_input, update_guard_intent},
+    equipment::{attach_pending_equipment, attach_unarmed_ik_chains, auto_fit_player_collider},
+    movement::player_movement,
+};
+use crate::game::ik::systems::update_shield_ik_target;
+use crate::game::common::systems::setup_anatomical_hurtboxes;
+
+#[derive(SystemSet, Debug, Hash, PartialEq, Eq, Clone)]
+pub enum PlayerSystemSet {
+    Input,
+    Logic,
+    Physics,
+}
+
+pub struct PlayerPlugin;
+
+impl Plugin for PlayerPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<PlayerMovementConfig>()
+            .init_resource::<PlayerCombatConfig>()
+            .configure_sets(
+                Update,
+                (
+                    PlayerSystemSet::Input,
+                    PlayerSystemSet::Logic,
+                    PlayerSystemSet::Physics,
+                )
+                    .chain(),
+            )
+            .add_systems(PostStartup, spawn_player)
+            .add_systems(
+                Update,
+                (
+                    handle_weapon_swap_input,
+                    handle_shield_swap_input, 
+                    update_guard_intent,
+                )
+                    .in_set(PlayerSystemSet::Input),
+            )
+            .add_systems(
+                Update,
+                (
+                    player_movement,
+                    update_shield_ik_target,
+                    setup_anatomical_hurtboxes,
+                )
+                    .in_set(PlayerSystemSet::Logic),
+            )
+            .add_systems(
+                Update,
+                (
+                    attach_pending_equipment,
+                    attach_unarmed_ik_chains, 
+                    auto_fit_player_collider,
+                )
+                    .in_set(PlayerSystemSet::Physics),
+            );
+    }
+}
+=== FILE: player/spawn.rs ===
+use bevy::prelude::*;
+use bevy_rapier3d::prelude::*;
+
+use super::components::{
+    PendingColliderFit, Player, PlayerInventory, PlayerState,
+};
+use crate::game::animation::components::{AnimationIntent, CharacterBones};
+use crate::game::combat::components::{
+    AttackIntent, CombatInput, CombatState, GuardIntent, LeftHand, RightHand,
+};
+use crate::game::health::components::Health;
+use crate::game::ik::components::IkTarget;
+use crate::game::shield::components::BlockingState;
+use crate::game::shield::data::ShieldType;
+use crate::game::stamina::components::Stamina;
+use crate::game::weapon::components::WeaponType;
+use crate::game::weapon::data::get_unarmed_config;
+
+use crate::game::common::components::{HurtboxProfile, HUMAN_PROXIES};
+
+#[derive(Component)]
+pub struct SpawnPointPlayer;
+
+pub fn spawn_player(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    spawn_point_query: Query<&Transform, With<SpawnPointPlayer>>,
+) {
+    let player_entity = commands.spawn_empty().id();
+    let character_scene = asset_server.load("models/proxyfull.glb#Scene0");
+
+    let spawn_transform = if let Ok(sp_transform) = spawn_point_query.get_single() {
+        Transform::from_translation(sp_transform.translation + Vec3::new(0.0, 50.0, 0.0))
+    } else {
+        Transform::from_xyz(0.0, 50.0, 0.0)
+    };
+
+    commands
+        .entity(player_entity)
+        .insert((
+            Player,
+            PendingColliderFit,
+            SpatialBundle {
+                transform: spawn_transform,
+                ..default()
+            },
+            PlayerInventory {
+                weapons: vec![None, Some(WeaponType::Spear), Some(WeaponType::VampireBlade)],
+                shields: vec![None, Some(ShieldType::Buckler), Some(ShieldType::KiteShield)],
+            },
+            PlayerState::default(),
+            Health::new(100.0),
+            Stamina::default(),
+            HurtboxProfile { proxies: HUMAN_PROXIES },
+        ))
+        .insert((
+            CombatInput::default(),
+            CombatState::default(),
+            AttackIntent::default(),
+            GuardIntent::default(),
+            IkTarget { position: Vec3::ZERO, weight: 0.0 },
+            BlockingState::Idle,
+        ))
+        .insert((
+            AnimationIntent::default(),
+            CharacterBones::default(),
+        ))
+        .insert((
+            RigidBody::KinematicPositionBased,
+            // Daha ince ve uzun bir kapsül (Yarım-uzunluk: 0.65, Yarıçap: 0.25)
+            // Kollar ve silahlar animasyon sırasında bu ince kapsülün dışına rahatça taşabilir.
+            Collider::capsule_y(0.65, 0.00025),
+            KinematicCharacterController::default(),
+            get_unarmed_config(),
+        ))
+        .with_children(|parent| {
+            parent.spawn(SceneBundle {
+                scene: character_scene,
+                transform: Transform::from_xyz(0.0, -1.0, 0.0)
+                    .with_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
+                ..default()
+            });
+
+            parent.spawn((
+                RightHand,
+                SpatialBundle {
+                    transform: Transform::from_xyz(0.4, 1.0, 0.4),
+                    ..default()
+                },
+            ));
+
+            parent.spawn((
+                LeftHand,
+                SpatialBundle {
+                    transform: Transform::from_xyz(-0.4, 1.0, 0.4),
+                    ..default()
+                },
+            ));
+        });
+}
+
+=== FILE: player/mod.rs ===
+pub mod components;
+pub mod plugin;
+pub mod systems;
+pub mod spawn;
+
+=== FILE: player/systems/combat.rs ===
+use bevy::prelude::*;
+use bevy::input::mouse::MouseMotion;
+
+use crate::game::player::components::{Player, PlayerCombatConfig, PlayerInventory};
+use crate::game::combat::components::{CombatState, GuardIntent};
+use crate::game::lock_on::components::LockOnState;
+use crate::game::shield::components::BlockingState;
+use crate::game::shield::data::ShieldType;
+use crate::game::shield::events::ShieldSwapRequestEvent;
+use crate::game::weapon::components::Weapon;
+use crate::game::weapon::events::WeaponSwapRequestEvent;
+
+pub fn update_guard_intent(
+    mut mouse_motion: EventReader<MouseMotion>,
+    lock_on: Res<LockOnState>,
+    config: Res<PlayerCombatConfig>,
+    mut query: Query<(&mut GuardIntent, &BlockingState), With<Player>>,
+) {
+    if lock_on.target.is_none() {
+        return;
+    }
+
+    for (mut intent, state) in query.iter_mut() {
+        if matches!(state, BlockingState::Blocking) {
+            for motion in mouse_motion.read() {
+                intent.offset += motion.delta * config.guard_sensitivity;
+                intent.offset = intent.offset.clamp(
+                    Vec2::splat(-config.guard_max_offset),
+                    Vec2::splat(config.guard_max_offset),
+                );
+            }
+        } else {
+            intent.offset = intent.offset.lerp(Vec2::ZERO, 0.1);
+        }
+    }
+}
+
+pub fn handle_weapon_swap_input(
+    keyboard_input: Res<ButtonInput<KeyCode>>,
+    mut swap_events: EventWriter<WeaponSwapRequestEvent>,
+    player_query: Query<(Entity, &CombatState, Option<&Weapon>, &PlayerInventory), With<Player>>,
+) {
+    if keyboard_input.just_pressed(KeyCode::Digit1) {
+        if let Ok((entity, combat_state, current_weapon_opt, inventory)) = player_query.get_single() {
+            if *combat_state == CombatState::Idle && !inventory.weapons.is_empty() {
+                // O anki silahı (varsa) tespit et
+                let current_type = current_weapon_opt.map(|w| w.weapon_type);
+                
+                let current_idx = inventory
+                    .weapons
+                    .iter()
+                    .position(|w| *w == current_type)
+                    .unwrap_or(0);
+                
+                // Bir sonrakine geç (None yani silahsız duruma da geçer)
+                let next_idx = (current_idx + 1) % inventory.weapons.len();
+                let next_weapon = inventory.weapons[next_idx];
+
+                swap_events.send(WeaponSwapRequestEvent {
+                    entity,
+                    target_weapon: next_weapon,
+                });
+            }
+        }
+    }
+}
+
+pub fn handle_shield_swap_input(
+    keyboard_input: Res<ButtonInput<KeyCode>>,
+    mut swap_events: EventWriter<ShieldSwapRequestEvent>,
+    player_query: Query<(Entity, &CombatState, Option<&ShieldType>, &PlayerInventory), With<Player>>,
+) {
+    if keyboard_input.just_pressed(KeyCode::Digit2) {
+        if let Ok((entity, combat_state, current_shield_type_opt, inventory)) = player_query.get_single() {
+            if *combat_state == CombatState::Idle && !inventory.shields.is_empty() {
+                let current_type = current_shield_type_opt.copied();
+                
+                let current_idx = inventory
+                    .shields
+                    .iter()
+                    .position(|s| *s == current_type)
+                    .unwrap_or(0);
+                
+                // Bir sonrakine geç (None yani kalkansız duruma da geçer)
+                let next_idx = (current_idx + 1) % inventory.shields.len();
+                let next_shield = inventory.shields[next_idx];
+
+                swap_events.send(ShieldSwapRequestEvent {
+                    entity,
+                    target_shield: next_shield,
+                });
+            }
+        }
+    }
+}
+=== FILE: player/systems/equipment.rs ===
+use bevy::prelude::*;
+use bevy::render::primitives::Aabb;
+use bevy_rapier3d::prelude::*;
+use crate::game::player::components::{PendingColliderFit, PendingEquipment, Player};
+use crate::game::animation::components::CharacterBones;
+use crate::game::combat::components::{EquippedWeapon, RightHand, LeftHand};
+use crate::game::ik::components::{IkTarget, TwoBoneIkChain};
+use crate::game::shield::data::ShieldType;
+
+pub fn auto_fit_player_collider(
+    mut commands: Commands,
+    mut player_query: Query<(Entity, &mut Collider), (With<Player>, With<PendingColliderFit>)>,
+    children_query: Query<&Children>,
+    aabb_query: Query<&Aabb>,
+) {
+    for (player_entity, mut collider) in player_query.iter_mut() {
+        let mut min = Vec3::splat(f32::MAX);
+        let mut max = Vec3::splat(f32::MIN);
+        let mut found_mesh = false;
+
+        for descendant in children_query.iter_descendants(player_entity) {
+            if let Ok(aabb) = aabb_query.get(descendant) {
+                let center = Vec3::from(aabb.center);
+                let half_extents = Vec3::from(aabb.half_extents);
+
+                min = min.min(center - half_extents);
+                max = max.max(center + half_extents);
+                found_mesh = true;
+            }
+        }
+
+        if found_mesh {
+            let size = max - min;
+            let radius = (size.x.max(size.z)) / 5.0;
+            let half_height = (size.y / 2.0) - radius;
+
+            *collider = Collider::capsule_y(half_height.max(0.1), radius.max(0.1));
+            
+            commands.entity(player_entity).remove::<PendingColliderFit>();
+            info!("BAŞARILI: Oyuncu fiziği 3D modele göre otomatik sarıldı! Yarıçap: {:.2}", radius);
+        }
+    }
+}
+
+pub fn attach_pending_equipment(
+    mut commands: Commands,
+    character_query: Query<(Entity, &CharacterBones)>,
+    equipment_query: Query<
+        (Entity, &Parent, Option<&EquippedWeapon>, Option<&ShieldType>),
+        With<PendingEquipment>,
+    >,
+) {
+    if equipment_query.is_empty() {
+        return;
+    }
+
+    for (character_entity, bones) in character_query.iter() {
+        if !bones.is_linked {
+            continue;
+        }
+
+        for (eq_entity, parent, is_weapon, is_shield) in equipment_query.iter() {
+            if parent.get() != character_entity {
+                continue;
+            }
+
+            if is_weapon.is_some() {
+                if let (Some(right_arm), Some(right_forearm), Some(right_hand)) =
+                    (bones.right_arm, bones.right_forearm, bones.right_hand)
+                {
+                    commands
+                        .entity(eq_entity)
+                        .remove::<PendingEquipment>()
+                        .insert(Transform::IDENTITY)
+                        .insert(IkTarget { position: Vec3::ZERO, weight: 0.0 })
+                        .insert(TwoBoneIkChain {
+                            root: right_arm,
+                            mid: right_forearm,
+                            tip: right_hand,
+                            pole_vector: Vec3::new(1.0, -1.0, -1.0),
+                        });
+                    commands.entity(right_hand).add_child(eq_entity);
+                }
+            } else if is_shield.is_some() {
+                if let Some(left_forearm) = bones.left_forearm {
+                    commands
+                        .entity(eq_entity)
+                        .remove::<PendingEquipment>()
+                        .insert(Transform::IDENTITY);
+                    commands.entity(left_forearm).add_child(eq_entity);
+
+                    if let (Some(arm), Some(hand)) = (bones.left_arm, bones.left_hand) {
+                        commands.entity(character_entity).insert(TwoBoneIkChain {
+                            root: arm,
+                            mid: left_forearm,
+                            tip: hand,
+                            pole_vector: Vec3::new(-1.0, -1.0, -1.0),
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub fn attach_unarmed_ik_chains(
+    mut commands: Commands,
+    character_query: Query<(Entity, &CharacterBones)>,
+    right_hand_query: Query<(Entity, &Parent), (With<RightHand>, Without<TwoBoneIkChain>)>,
+    left_hand_query: Query<(Entity, &Parent), (With<LeftHand>, Without<TwoBoneIkChain>)>,
+) {
+    for (character_entity, bones) in character_query.iter() {
+        if !bones.is_linked {
+            continue;
+        }
+
+        // Sağ elin marker entity'sini bul, gerçek animasyon kemiğine (right_hand_bone) taşı ve IK kur!
+        for (hand_entity, parent) in right_hand_query.iter() {
+            if parent.get() == character_entity {
+                if let (Some(right_arm), Some(right_forearm), Some(right_hand_bone)) =
+                    (bones.right_arm, bones.right_forearm, bones.right_hand)
+                {
+                    commands
+                        .entity(hand_entity)
+                        .insert(Transform::IDENTITY) // Eski statik konumu sıfırla, tam kemiğe otursun
+                        .insert(IkTarget { position: Vec3::ZERO, weight: 0.0 })
+                        .insert(TwoBoneIkChain {
+                            root: right_arm,
+                            mid: right_forearm,
+                            tip: right_hand_bone,
+                            pole_vector: Vec3::new(1.0, -1.0, -1.0),
+                        });
+                    
+                    // Marker entity'yi CharacterRoot yerine El Kemiğine çocuk olarak bağla
+                    commands.entity(right_hand_bone).add_child(hand_entity);
+                }
+            }
+        }
+
+        // Sol elin marker entity'sini bul, gerçek animasyon kemiğine (left_hand_bone) taşı ve IK kur!
+        for (hand_entity, parent) in left_hand_query.iter() {
+            if parent.get() == character_entity {
+                if let (Some(left_arm), Some(left_forearm), Some(left_hand_bone)) =
+                    (bones.left_arm, bones.left_forearm, bones.left_hand)
+                {
+                    commands
+                        .entity(hand_entity)
+                        .insert(Transform::IDENTITY) // Eski statik konumu sıfırla, tam kemiğe otursun
+                        .insert(IkTarget { position: Vec3::ZERO, weight: 0.0 })
+                        .insert(TwoBoneIkChain {
+                            root: left_arm,
+                            mid: left_forearm,
+                            tip: left_hand_bone,
+                            pole_vector: Vec3::new(-1.0, -1.0, -1.0),
+                        });
+                    
+                    // Marker entity'yi CharacterRoot yerine El Kemiğine çocuk olarak bağla
+                    commands.entity(left_hand_bone).add_child(hand_entity);
+                }
+            }
+        }
+    }
+}
+
+=== FILE: player/systems/mod.rs ===
+pub mod movement;
+pub mod combat;
+pub mod equipment;
+
+=== FILE: player/systems/movement.rs ===
+use bevy::prelude::*;
+use bevy_rapier3d::prelude::*;
+use crate::game::player::components::{Player, PlayerMovementConfig, PlayerState};
+use crate::game::animation::components::AnimationIntent;
+use crate::game::common::components::MainCamera;
+use crate::game::dodge::components::DodgeState;
+use crate::game::lock_on::components::LockOnState;
+use crate::game::stamina::components::Stamina;
+
+pub fn player_movement(
+    keys: Res<ButtonInput<KeyCode>>,
+    time: Res<Time>,
+    config: Res<PlayerMovementConfig>,
+    lock_on: Res<LockOnState>,
+    mut player_query: Query<
+        (
+            &mut Transform,
+            &mut KinematicCharacterController,
+            Option<&KinematicCharacterControllerOutput>,
+            &mut PlayerState,
+            &mut Stamina,
+            &mut AnimationIntent,
+        ),
+        (With<Player>, Without<DodgeState>),
+    >,
+    camera_query: Query<&Transform, (With<MainCamera>, Without<Player>)>,
+    target_query: Query<&Transform, (Without<Player>, Without<MainCamera>)>,
+    mut log_timer: Local<f32>, // YENİ: Log spam'ini önlemek için lokal zamanlayıcı eklendi
+) {
+    let Ok((mut player_transform, mut controller, output, mut state, mut stamina, mut intent)) =
+        player_query.get_single_mut()
+    else {
+        return;
+    };
+
+    // YENİ: Saniyede 1 kez anlık oyuncu konumunu konsola yazdır
+    *log_timer += time.delta_seconds();
+    if *log_timer >= 1.0 {
+        info!("Anlık Player Konumu: {:?}", player_transform.translation);
+        *log_timer = 0.0;
+    }
+
+    let Ok(camera_transform) = camera_query.get_single() else {
+        return;
+    };
+
+    let mut direction = Vec3::ZERO;
+    let forward = camera_transform.forward();
+    let forward_flat = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
+    let right = camera_transform.right();
+    let right_flat = Vec3::new(right.x, 0.0, right.z).normalize_or_zero();
+
+    if keys.pressed(KeyCode::KeyW) { direction += forward_flat; }
+    if keys.pressed(KeyCode::KeyS) { direction -= forward_flat; }
+    if keys.pressed(KeyCode::KeyD) { direction += right_flat; }
+    if keys.pressed(KeyCode::KeyA) { direction -= right_flat; }
+
+    let mut is_moving = false;
+    let mut is_sprinting = false;
+    let mut speed = config.walk_speed;
+
+    if direction != Vec3::ZERO {
+        is_moving = true;
+        if keys.pressed(KeyCode::ShiftLeft) {
+            let cost = stamina.sprint_cost * time.delta_seconds();
+            if stamina.try_drain(cost) {
+                speed = config.sprint_speed;
+                is_sprinting = true;
+            }
+        }
+    }
+
+    let mut movement = direction.normalize_or_zero() * speed * time.delta_seconds();
+
+    let is_grounded = match output {
+        Some(out) => out.grounded,
+        None => false,
+    };
+
+    intent.is_moving = is_moving;
+    intent.is_sprinting = is_sprinting;
+    intent.is_in_air = !is_grounded;
+
+    if is_grounded {
+        state.vertical_velocity = -0.1;
+        if keys.just_pressed(KeyCode::Space) {
+            let cost = stamina.jump_cost;
+            if stamina.try_drain(cost) {
+                state.vertical_velocity = config.jump_velocity;
+            }
+        }
+    } else {
+        state.vertical_velocity += config.gravity * time.delta_seconds();
+    }
+
+    movement.y = state.vertical_velocity * time.delta_seconds();
+    controller.translation = Some(movement);
+
+    if let Some(target_entity) = lock_on.target {
+        if let Ok(target_transform) = target_query.get(target_entity) {
+            let target_pos = Vec3::new(
+                target_transform.translation.x,
+                player_transform.translation.y,
+                target_transform.translation.z,
+            );
+            player_transform.look_at(target_pos, Vec3::Y);
+        }
+    } else if direction != Vec3::ZERO {
+        let target_position = player_transform.translation + direction;
+        player_transform.look_at(target_position, Vec3::Y);
+    }
+}
+=== FILE: player/systems/bone_proxies.rs ===
+use bevy::prelude::*;
+use bevy_rapier3d::prelude::*;
+
+use crate::game::combat::components::Hurtbox;
+use crate::game::player::components::Player;
+
+// Blender'da hazırladığımız tüm proxy isimlerinin eksiksiz listesi
+pub const ALL_PROXIES: &[&str] = &[
+    "Head_Proxy",
+    "Hips_Proxy",
+    "LeftArm_Proxy",
+    "LeftFoot_Proxy",
+    "LeftForeArm_Proxy",
+    "LeftHand_Proxy",
+    "LeftLeg_Proxy",
+    "LeftUpLeg_Proxy",
+    "RightArm_Proxy",
+    "RightFoot_Proxy",
+    "RightForeArm_Proxy",
+    "RightHand_Proxy",
+    "RightLeg_Proxy",
+    "RightUpLeg_Proxy",
+    "Spine2_Proxy",
+];
+
+// Collider gizmo çizimleri ve debug için kullanılacak işaretçi
+#[derive(Component)]
+pub struct BoneColliderMarker {
+    pub bone_name: &'static str,
+    pub owner: Entity,
+}
+
+// Bir proxy bir kez işlendikten sonra tekrar taranmaması için güvenlik bileşeni
+#[derive(Component)]
+pub struct ProxyProcessed;
+
+pub fn hide_blender_proxies(
+    mut commands: Commands,
+    proxies_query: Query<(Entity, &Name, Option<&Visibility>), Without<BoneColliderMarker>>,
+) {
+    for (entity, name, vis) in proxies_query.iter() {
+        let name_str = name.as_str();
+        if ALL_PROXIES.contains(&name_str) {
+            if vis.is_none() {
+                commands.entity(entity).insert(Visibility::Hidden);
+            } else if let Some(v) = vis {
+                if *v != Visibility::Hidden {
+                    commands.entity(entity).insert(Visibility::Hidden);
+                }
+            }
+        }
+    }
+}
+
+pub fn setup_bone_colliders(
+    mut commands: Commands,
+    player_query: Query<Entity, With<Player>>,
+    children_query: Query<&Children>,
+    names_query: Query<&Name>,
+    mesh_handles: Query<&Handle<Mesh>>,
+    meshes: Res<Assets<Mesh>>,
+    // Yalnızca henüz işlenmemiş (ProxyProcessed olmayan) nesneleri tara
+    unprocessed_proxies: Query<Entity, (Without<ProxyProcessed>, With<Name>)>,
+) {
+    for player_entity in player_query.iter() {
+        for descendant in children_query.iter_descendants(player_entity) {
+            if unprocessed_proxies.contains(descendant) {
+                if let Ok(name) = names_query.get(descendant) {
+                    let name_str = name.as_str();
+                    
+                    // Nesne adı proxy listemizde var mı?
+                    if let Some(&proxy_name) = ALL_PROXIES.iter().find(|&&p| p == name_str) {
+                        
+                        let mut target_mesh_entity = None;
+                        let mut target_mesh_handle = None;
+
+                        // Mesh bileşeni doğrudan objede olabilir veya GLTF yükleyicisi mesh'i bir alt Node'a atmış olabilir
+                        if let Ok(handle) = mesh_handles.get(descendant) {
+                            target_mesh_entity = Some(descendant);
+                            target_mesh_handle = Some(handle.clone());
+                        } else {
+                            for sub_desc in children_query.iter_descendants(descendant) {
+                                if let Ok(handle) = mesh_handles.get(sub_desc) {
+                                    target_mesh_entity = Some(sub_desc);
+                                    target_mesh_handle = Some(handle.clone());
+                                    break;
+                                }
+                            }
+                        }
+
+                        if let (Some(mesh_ent), Some(handle)) = (target_mesh_entity, target_mesh_handle) {
+                            if let Some(mesh_data) = meshes.get(&handle) {
+                                // Blender'daki polygon yapısını milimetrik kapsayan Dışbükey Örtü (ConvexHull) collider
+                                if let Some(collider) = Collider::from_bevy_mesh(mesh_data, &ComputedColliderShape::ConvexHull) {
+                                    
+                                    // 1. Mesh'in olduğu entity'e collider ve hurtbox'ı ekle
+                                    commands.entity(mesh_ent).insert((
+                                        collider,
+                                        BoneColliderMarker { 
+                                            bone_name: proxy_name, 
+                                            owner: player_entity 
+                                        },
+                                        Hurtbox { owner: player_entity },
+                                        Sensor,
+                                        ActiveEvents::COLLISION_EVENTS,
+                                    ));
+
+                                    // 2. Ana proxy objesini "İşlendi" olarak işaretle ki sonsuz döngüye girmesin
+                                    commands.entity(descendant).insert(ProxyProcessed);
+                                    
+                                    info!("BAŞARILI: {} mesh'inden ConvexHull collider üretildi ve entegre edildi!", proxy_name);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+=== FILE: player/components.rs ===
+use bevy::prelude::*;
+use crate::game::weapon::components::WeaponType;
+use crate::game::shield::data::ShieldType;
+
+#[derive(Component)]
+pub struct Player;
+
+#[derive(Component)]
+pub struct PendingEquipment;
+
+#[derive(Component)]
+pub struct PendingColliderFit;
+
+#[derive(Component, Default)]
+pub struct PlayerInventory {
+    // YENİ: Unarmed için Option kullanıyoruz
+    pub weapons: Vec<Option<WeaponType>>, 
+    pub shields: Vec<Option<ShieldType>>,
+}
+
+#[derive(Component, Default)]
+pub struct PlayerState {
+    pub vertical_velocity: f32,
+}
+
+#[derive(Resource)]
+pub struct PlayerMovementConfig {
+    pub walk_speed: f32,
+    pub sprint_speed: f32,
+    pub jump_velocity: f32,
+    pub gravity: f32,
+}
+
+impl Default for PlayerMovementConfig {
+    fn default() -> Self {
+        Self {
+            walk_speed: 5.0,
+            sprint_speed: 84.0,
+            jump_velocity: 15.0,
+            gravity: -10.0,
+        }
+    }
+}
+
+#[derive(Resource)]
+pub struct PlayerCombatConfig {
+    pub guard_sensitivity: f32,
+    pub guard_max_offset: f32,
+}
+
+impl Default for PlayerCombatConfig {
+    fn default() -> Self {
+        Self {
+            guard_sensitivity: 0.005,
+            guard_max_offset: 0.5,
+        }
+    }
+}

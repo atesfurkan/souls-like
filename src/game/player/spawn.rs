@@ -1,115 +1,100 @@
-use super::components::{Player, PlayerMovementConfig, PlayerState,
-    PendingEquipment};
-use crate::game::combat::components::{AttackIntent, CombatState, EquippedWeapon, Hurtbox};
-use crate::game::health::components::Health;
-use crate::game::stamina::components::Stamina;
-use crate::game::weapon::components::{WeaponType};
-use crate::game::weapon::data::get_weapon_data;
-use crate::game::shield::data::{get_shield_stats_bundle, build_shield_hierarchy, ShieldType};
-use crate::game::animation::components::{CharacterBones, AnimationIntent};
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
-use crate::game::combat::components::GuardIntent;
-use crate::game::shield::components::EquippedShield;
+
+use super::components::{
+    PendingColliderFit, Player, PlayerInventory, PlayerState,
+};
+use crate::game::animation::components::{AnimationIntent, CharacterBones};
+use crate::game::combat::components::{
+    AttackIntent, CombatInput, CombatState, GuardIntent, LeftHand, RightHand,
+};
+use crate::game::health::components::Health;
 use crate::game::ik::components::IkTarget;
 use crate::game::shield::components::BlockingState;
+use crate::game::shield::data::ShieldType;
+use crate::game::stamina::components::Stamina;
+use crate::game::weapon::components::WeaponType;
+use crate::game::weapon::data::get_unarmed_config;
 
+use crate::game::common::components::{HurtboxProfile, HUMAN_PROXIES};
+
+#[derive(Component)]
+pub struct SpawnPointPlayer;
 
 pub fn spawn_player(
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    asset_server: Res<AssetServer>, // Modeli yüklemek için AssetServer eklendi
+    asset_server: Res<AssetServer>,
+    spawn_point_query: Query<&Transform, With<SpawnPointPlayer>>,
 ) {
     let player_entity = commands.spawn_empty().id();
+    let character_scene = asset_server.load("models/proxyfull.glb#Scene0");
 
-    // 3D Modeli yüklüyoruz
-    let character_scene = asset_server.load("models/character.glb#Scene0");
+    let spawn_transform = if let Ok(sp_transform) = spawn_point_query.get_single() {
+        Transform::from_translation(sp_transform.translation + Vec3::new(0.0, 50.0, 0.0))
+    } else {
+        Transform::from_xyz(0.0, 50.0, 0.0)
+    };
 
-    // Ana oyuncu kapsülü (Ebeveyn / Parent) - Artık görünmez bir mantık/fiziksel obje
     commands
         .entity(player_entity)
         .insert((
-
-            GuardIntent::default(),
-            IkTarget { 
-                position: Vec3::ZERO, // Başlangıçta önemsiz
-                weight: 0.0,          // Başlangıçta IK kapalı
-            },
-    
-    ))
-        .insert((
+            Player,
+            PendingColliderFit,
             SpatialBundle {
-                transform: Transform::from_xyz(0.0, 3.0, 0.0),
+                transform: spawn_transform,
                 ..default()
             },
-            Player,
-            CharacterBones::default(),
-            AnimationIntent::default(),
+            PlayerInventory {
+                weapons: vec![None, Some(WeaponType::Spear), Some(WeaponType::VampireBlade)],
+                shields: vec![None, Some(ShieldType::Buckler), Some(ShieldType::KiteShield)],
+            },
             PlayerState::default(),
-            CombatState::default(), // Başlangıçta Idle
-            AttackIntent::default(),
-
-            
-            Health::new(100.0), // Oyuncunun canı
-            Hurtbox {
-                owner: player_entity,
-            }, // Oyuncunun hasar alma kutusu (sahibi kendisi)
+            Health::new(100.0),
             Stamina::default(),
+            HurtboxProfile { proxies: HUMAN_PROXIES },
+        ))
+        .insert((
+            CombatInput::default(),
+            CombatState::default(),
+            AttackIntent::default(),
+            GuardIntent::default(),
+            IkTarget { position: Vec3::ZERO, weight: 0.0 },
+            BlockingState::Idle,
+        ))
+        .insert((
+            AnimationIntent::default(),
+            CharacterBones::default(),
+        ))
+        .insert((
             RigidBody::KinematicPositionBased,
-            Collider::capsule_y(0.5, 0.5), // Çarpışma motoru için fiziksel kapsül korunuyor
+            // Daha ince ve uzun bir kapsül (Yarım-uzunluk: 0.65, Yarıçap: 0.25)
+            // Kollar ve silahlar animasyon sırasında bu ince kapsülün dışına rahatça taşabilir.
+            Collider::capsule_y(0.65, 0.00025),
             KinematicCharacterController::default(),
-            get_weapon_data(WeaponType::VampireBlade),
-            get_shield_stats_bundle(ShieldType::KiteShield),
-            
-            
+            get_unarmed_config(),
         ))
         .with_children(|parent| {
-            
-            // --- 3D MODEL (GLTF/GLB) ---
             parent.spawn(SceneBundle {
                 scene: character_scene,
-                // Kapsülün tam ortasında doğmaması, ayaklarının yere basması için -1.0 Y ofseti veriyoruz.
-                // Kendi modelinin boyutuna göre bu ofseti ileride ayarlayabilirsin.
                 transform: Transform::from_xyz(0.0, -1.0, 0.0)
-                    .with_rotation(Quat::from_rotation_y(std::f32::consts::PI)), 
+                    .with_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
                 ..default()
             });
 
-            // --- SİLAH (Bağlanmayı bekliyor) ---
             parent.spawn((
+                RightHand,
                 SpatialBundle {
-                    // Silahın elde doğru durması için gereken rotasyon ofsetleri
-                    // (Bu değerleri Mixamo rig'ine göre ileride ince ayar yapabiliriz)
-                    transform: Transform::from_xyz(0.0, 0.0, 0.0)
-                        .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_4)),
+                    transform: Transform::from_xyz(0.4, 1.0, 0.4),
                     ..default()
                 },
-                EquippedWeapon,
-                PendingEquipment, // Kemik sistemi yüklenince el kemiğine bağlanacak
             ));
 
-            // --- KALKAN (Bağlanmayı bekliyor) ---
             parent.spawn((
+                LeftHand,
                 SpatialBundle {
-                    transform: Transform::from_rotation(Quat::from_rotation_z(std::f32::consts::PI)),
+                    transform: Transform::from_xyz(-0.4, 1.0, 0.4),
                     ..default()
                 },
-                
-                
-                EquippedShield, 
-                GuardIntent::default(),
-                IkTarget { position: Vec3::ZERO, weight: 0.0 }, // <-- BU EKSİK OLABİLİR!
-                BlockingState::Idle,
-                
-                PendingEquipment, // Kemik sistemi yüklenince sol kol kemiğine bağlanacak
-                ShieldType::KiteShield,
-                
-            )).with_children(|shield_root| {
-                // Kalkanın görsel hiyerarşisini bu geçici kökün içine inşa ediyoruz.
-                // Tüm bu yapı daha sonra sol kola transfer edilecek.
-                build_shield_hierarchy(shield_root, ShieldType::TowerShield, player_entity, &mut meshes, &mut materials);
-            });
-            
+            ));
         });
 }

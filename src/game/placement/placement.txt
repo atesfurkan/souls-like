@@ -1,0 +1,122 @@
+=== FILE: ./plugin.rs ===
+use bevy::prelude::*;
+use super::components::{Placement, PlacementConfig};
+
+pub struct PlacementPlugin;
+
+impl Plugin for PlacementPlugin {
+    fn build(&self, app: &mut App) {
+        // İleride save/load sistemleri ve editor için register işlemi
+        app.register_type::<Placement>();
+        
+        // Yoğunluk ayarlarımızı Resource olarak başlatıyoruz
+        app.init_resource::<PlacementConfig>();
+    }
+}
+
+=== FILE: ./mod.rs ===
+pub mod components;
+pub mod plugin;
+
+=== FILE: ./components.rs ===
+use bevy::prelude::*;
+use crate::game::world::analysis::components::SurfaceType;
+
+#[derive(Reflect, Clone, Debug, PartialEq)]
+pub enum PlacementRuleKind {
+    /// Enemy varyantlarının çalışma anında Chunk koordinatına göre dinamik belirlendiği kural türü.
+    DynamicEnemy,
+    /// Belirli bir statik nesne (Chest, Tree, Grass vb.) yerleştirme kuralı.
+    Object(ObjectSpawnVariant),
+}
+
+#[derive(Reflect, Clone, Debug)]
+pub struct PlacementRule {
+    pub kind: PlacementRuleKind,
+    pub count_per_chunk: usize,
+    pub surface_requirement: SurfaceType,
+    /// true: Sadece dış dünyada (güneş gören zemin)
+    /// false: Sadece mağara içinde (tavanı olan zemin)
+    /// None: Fark etmez (ikisi de geçerli)
+    pub open_sky_requirement: Option<bool>,
+}
+
+#[derive(Resource, Clone, Debug)]
+pub struct PlacementConfig {
+    pub rules: Vec<PlacementRule>,
+}
+
+impl Default for PlacementConfig {
+    fn default() -> Self {
+        Self {
+            // Gelecekte bu liste JSON/TOML dosyasından yüklenebilecek, şu an Data-Driven defaultumuz:
+            rules: vec![
+                PlacementRule {
+                    kind: PlacementRuleKind::Object(ObjectSpawnVariant::Chest),
+                    count_per_chunk: 1,
+                    surface_requirement: SurfaceType::Floor,
+                    open_sky_requirement: None, // Her yerde çıkabilir
+                },
+                PlacementRule {
+                    kind: PlacementRuleKind::Object(ObjectSpawnVariant::Stalactite),
+                    count_per_chunk: 4,
+                    surface_requirement: SurfaceType::Ceiling,
+                    open_sky_requirement: None,
+                },
+                PlacementRule {
+                    kind: PlacementRuleKind::DynamicEnemy,
+                    count_per_chunk: 2,
+                    surface_requirement: SurfaceType::Floor,
+                    open_sky_requirement: None, // Her yerde çıkabilir
+                },
+                PlacementRule {
+                    kind: PlacementRuleKind::Object(ObjectSpawnVariant::Tree),
+                    count_per_chunk: 5,
+                    surface_requirement: SurfaceType::Floor,
+                    open_sky_requirement: Some(true), // Sadece yüzeyde (güneş gören yerde) çıkar
+                },
+            ],
+        }
+    }
+}
+
+#[derive(Component, Reflect, Clone, Debug)]
+#[reflect(Component)]
+pub struct Placement {
+    pub kind: PlacementKind,
+    pub state: PlacementState,
+    pub chunk_coord: IVec3, 
+    pub local_id: usize,
+    pub normal: Vec3,
+    pub surface_type: SurfaceType,
+}
+
+#[derive(Reflect, Clone, Debug, PartialEq)]
+pub enum PlacementKind {
+    PlayerSpawn,
+    Enemy(EnemySpawnVariant),
+    Object(ObjectSpawnVariant),
+}
+
+#[derive(Reflect, Clone, Debug, PartialEq)]
+pub enum EnemySpawnVariant {
+    LightSpearman,
+    Vanguard,
+    HeavyDefender,
+    BossArena,
+}
+
+#[derive(Reflect, Clone, Debug, PartialEq)]
+pub enum ObjectSpawnVariant {
+    Chest,
+    Stalactite,
+    Tree,
+}
+
+#[derive(Reflect, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PlacementState {
+    #[default]
+    Active,
+    Consumed,  
+    Discarded, 
+}

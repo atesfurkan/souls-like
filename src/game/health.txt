@@ -1,0 +1,106 @@
+=== FILE: health/plugin.rs ===
+use bevy::prelude::*;
+use super::events::{DamageEvent, HealEvent, DeathEvent};
+use super::systems::{check_death, process_damage , process_heal};
+
+pub struct HealthPlugin;
+
+impl Plugin for HealthPlugin {
+    fn build(&self, app: &mut App) {
+        // Event'i sisteme kaydediyoruz
+        app.add_event::<DamageEvent>()
+           // Yeni event'i kaydediyoruz
+           .add_event::<HealEvent>()
+           // Zincir: Hasar İşle -> İyileşmeyi İşle -> Ölüm Kontrolü yap 
+           .add_event::<DeathEvent>()
+           .add_systems(Update, (process_damage, process_heal, check_death).chain());
+    }
+}
+
+=== FILE: health/mod.rs ===
+pub mod components;
+pub mod events;
+pub mod plugin;
+pub mod systems;
+
+=== FILE: health/components.rs ===
+use bevy::prelude::*;
+
+#[derive(Component)]
+pub struct Health {
+    pub current: f32,
+    pub max: f32,
+}
+
+impl Health {
+    pub fn new(max_health: f32) -> Self {
+        Self {
+            current: max_health,
+            max: max_health,
+        }
+    }
+}
+
+=== FILE: health/events.rs ===
+use bevy::prelude::*;
+
+#[derive(Event)]
+pub struct DamageEvent {
+    pub target: Entity, // Hasarı kim alıyor?
+    pub amount: f32,    // Ne kadar hasar alıyor?
+}
+
+#[derive(Event)]
+pub struct HealEvent {
+    pub target: Entity, // Kim iyileşiyor?
+    pub amount: f32,    // Ne kadar canı artıyor?
+}
+
+#[derive(Event)]
+pub struct DeathEvent {
+    pub target: Entity, // Hangi entity öldü?
+}
+=== FILE: health/systems.rs ===
+use bevy::prelude::*;
+use super::components::Health;
+use super::events::{DamageEvent, HealEvent , DeathEvent};
+
+pub fn process_damage(
+    mut events: EventReader<DamageEvent>,
+    mut health_query: Query<&mut Health>,
+) {
+    for ev in events.read() {
+        // Eğer hasar alan entity'nin Health componenti varsa canını düşür
+        if let Ok(mut health) = health_query.get_mut(ev.target) {
+            health.current -= ev.amount;
+        }
+    }
+}
+
+// YENİ EKLENEN KISIM
+pub fn process_heal(
+    mut events: EventReader<HealEvent>,
+    mut health_query: Query<&mut Health>,
+) {
+    for ev in events.read() {
+        if let Ok(mut health) = health_query.get_mut(ev.target) {
+            // Canı artır, ancak maksimum canı geçmesine izin verme
+            health.current = (health.current + ev.amount).min(health.max);
+        }
+    }
+}
+
+pub fn check_death(
+    mut commands: Commands,
+    query: Query<(Entity, &Health)>,
+    mut death_writer: EventWriter<DeathEvent>,
+) {
+    for (entity, health) in query.iter() {
+        if health.current <= 0.0 {
+            death_writer.send(DeathEvent { target: entity });
+            // Canı sıfırlanan entity'i ve tüm çocuklarını (varsa silahı, zırhı vs) dünyadan sil
+            commands.entity(entity).despawn_recursive();
+        }
+    }
+}
+

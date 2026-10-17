@@ -1,3 +1,4 @@
+
 use bevy::prelude::*;
 use bevy::animation::graph::AnimationNodeIndex; // DOĞRU İMPORT
 
@@ -34,8 +35,7 @@ pub struct CharacterAnimations {
     pub jump: Handle<AnimationClip>,
 }
 
-/// Karakterin önemli kemiklerinin Entity referanslarını tutar.
-/// Procedural animation ve IK için bu referanslara sıkça ihtiyaç duyulacaktır.
+// CharacterBones struct'ını şu şekilde güncelle:
 #[derive(Component, Debug, Reflect)]
 pub struct CharacterBones {
     pub is_linked: bool,
@@ -44,11 +44,14 @@ pub struct CharacterBones {
     pub spine: Option<Entity>,
     pub head: Option<Entity>,
     // --- SOL KOL ZİNCİRİ (Kalkan ve IK İçin) ---
-    pub left_arm: Option<Entity>,     // IK Root (Omuz/Pazu)
-    pub left_forearm: Option<Entity>, // IK Mid (Dirsek)
-    pub left_hand: Option<Entity>,    // IK Tip (El)
+    pub left_arm: Option<Entity>,     
+    pub left_forearm: Option<Entity>, 
+    pub left_hand: Option<Entity>,    
+    // --- SAĞ KOL ZİNCİRİ (Silah ve IK İçin) ---
+    pub right_arm: Option<Entity>,       // YENİ EKLENDİ
+    pub right_forearm: Option<Entity>,   // YENİ EKLENDİ
+    pub right_hand: Option<Entity>,   
     // -------------------------------------------
-    pub right_hand: Option<Entity>,   // Silah için eklendi
     pub left_foot: Option<Entity>,
     pub right_foot: Option<Entity>,
 }
@@ -64,10 +67,11 @@ impl Default for CharacterBones {
             left_arm: None,
             left_forearm: None,
             left_hand: None,
+            right_arm: None,       // YENİ
+            right_forearm: None,   // YENİ
             right_hand: None,
             left_foot: None,
             right_foot: None,
         }
     }
 }
-

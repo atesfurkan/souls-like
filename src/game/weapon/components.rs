@@ -8,6 +8,9 @@ pub enum AttackType {
     Overhead,
     LeftSwing,
     RightSwing,
+    // YENİ: Unarmed sağ ve sol el saldırı ayrımı
+    UnarmedRight,
+    UnarmedLeft,
 }
 
 
@@ -15,6 +18,7 @@ pub enum AttackType {
 pub enum WeaponType {
     Spear,
     VampireBlade,
+    Hammer,
 }
 
 // Tek bir saldırının tüm özellikleri
@@ -23,11 +27,13 @@ pub struct AttackDefinition {
     pub windup_duration: f32,
     pub active_duration: f32,
     pub recovery_duration: f32,
+    pub max_charge_duration: f32, // yeni
     pub stamina_cost: f32,
     pub damage: f32,
+    pub poise_damage: f32,
     pub hitbox_radius: f32,
     pub hitbox_offset: Vec3,
-    pub lifesteal: f32, // YENİ: Vuruş başına kazanılacak can miktarı
+    pub lifesteal: f32, 
 }
 
 #[derive(Component)]
@@ -41,6 +47,7 @@ pub struct Weapon {
 pub enum WeaponPart {
     Cylinder { radius: f32, height: f32, color: Color },
     Cone { radius: f32, height: f32, color: Color },
+    Cuboid { x: f32, y: f32, z: f32, color: Color },
     
     // İleride 3D model eklediğimizde buraya şunu ekleyeceğiz:
     // GltfModel { path: String },

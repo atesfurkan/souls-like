@@ -1,4 +1,6 @@
 use bevy::prelude::*;
+use bevy_rapier3d::prelude::*;
+
 use super::components::{LockOnState, Lockable};
 use crate::game::player::components::Player;
 use crate::game::health::components::Health;
@@ -12,22 +14,19 @@ pub fn toggle_lock_on(
     lockable_query: Query<(Entity, &Transform, &Health), With<Lockable>>,
 ) {
     if mouse.just_pressed(MouseButton::Middle) {
-        // Eğer zaten kilitliysek, kilidi kaldır
         if lock_on.target.is_some() {
             lock_on.target = None;
             println!("Lock-on Disabled");
         } else {
-            // Değilsek en yakın düşmanı bul
             let Ok(player_transform) = player_query.get_single() else { return };
             let player_pos = player_transform.translation;
             
             let mut closest_dist = f32::MAX;
             let mut closest_enemy = None;
-            
+
             for (entity, transform, health) in lockable_query.iter() {
                 if health.current > 0.0 {
                     let dist = player_pos.distance(transform.translation);
-                    // Sadece 20 birim yakındaki düşmanlara kilitlenilebilir
                     if dist < 20.0 && dist < closest_dist {
                         closest_dist = dist;
                         closest_enemy = Some(entity);
@@ -50,13 +49,11 @@ pub fn validate_lock_on(
 ) {
     if let Some(target) = lock_on.target {
         if let Ok(health) = query.get(target) {
-            // Canı 0'a düştüyse kilidi kır
             if health.current <= 0.0 {
                 lock_on.target = None;
                 println!("Target Dead -> Lock-on Disabled");
             }
         } else {
-            // Entity bir şekilde dünyadan tamamen silindiyse
             lock_on.target = None;
         }
     }
@@ -64,45 +61,83 @@ pub fn validate_lock_on(
 
 pub fn lock_on_camera_focus(
     lock_on: Res<LockOnState>,
-    time: Res<Time>, // Yumuşak geçiş (lerp) için eklendi
+    time: Res<Time>, 
     mut camera_query: Query<&mut Transform, With<MainCamera>>,
     target_query: Query<&Transform, (Without<MainCamera>, Without<Player>)>,
-    player_query: Query<&Transform, (With<Player>, Without<MainCamera>)>, // Oyuncuyu bulmak için eklendi
+    player_query: Query<(Entity, &Transform), (With<Player>, Without<MainCamera>)>, 
+    rapier_context: Res<RapierContext>, 
 ) {
     if let Some(target_entity) = lock_on.target {
         let Ok(target_transform) = target_query.get(target_entity) else { return };
-        let Ok(player_transform) = player_query.get_single() else { return };
+        let Ok((player_entity, player_transform)) = player_query.get_single() else { return };
         let Ok(mut camera_transform) = camera_query.get_single_mut() else { return };
-        
+
         let player_pos = player_transform.translation;
         let target_pos = target_transform.translation;
 
-        // 1. Oyuncudan hedefe doğru olan yönü bul (Sadece X ve Z ekseninde)
-        let mut dir_to_target = target_pos - player_pos;
-        dir_to_target.y = 0.0;
-        let forward = dir_to_target.normalize_or_zero();
+        // Gerçek mesafeyi (Yüksekliği de hesaba katarak) bul
+        let dir_to_target = target_pos - player_pos;
+        let distance_to_target = dir_to_target.length();
         
-        // 2. Kamerayı sağa veya sola kaydırmak için "Sağ" (Right) vektörünü hesapla
-        // İleride bunu ayarlardan okuyup sola almak istersen: Vec3::new(forward.z, 0.0, -forward.x) yapabilirsin.
+        // Y eksenini sıfırlayarak sadece yatay yönelimleri bul
+        let mut dir_2d = dir_to_target;
+        dir_2d.y = 0.0;
+        let forward = dir_2d.normalize_or_zero();
         let right = Vec3::new(-forward.z, 0.0, forward.x); 
 
-        // --- KENDİ ZEVKİNE GÖRE DEĞİŞTİREBİLECEĞİN DEĞERLER ---
-        let height_offset = 2.5;     // Kameranın yüksekliği (Oyuncunun tepesinden ne kadar yukarıda)
-        let distance_behind = 4.0;   // Oyuncunun ne kadar gerisinde duracak
-        let side_offset = 1.5;       // Sağ omuz boşluğu (Karakteri görmeni sağlar)
-        let camera_speed = 5.0;      // Kameranın hedefe süzülme hızı (Glitchleri önler)
+        // --- DİNAMİK KAMERA DEĞERLERİ ---
+        // Hedef uzaklaştıkça kameranın temel mesafesini (4.0) orantılı olarak artırır (Maksimum 8.0'a kadar)
+        let base_distance = 4.0;
+        let dynamic_distance = (base_distance + (distance_to_target * 0.25)).clamp(4.0, 8.0);
+        
+        let height_offset = 2.5;
+        let side_offset = 1.5;
+        let camera_speed = 5.0;
 
-        // 3. Kameranın olması GEREKEN konumu hesapla
+        // 3. Kameranın olması GEREKEN ideal konumu hesapla (Dinamik mesafeyi kullanarak)
         let desired_camera_pos = player_pos 
-            - (forward * distance_behind) 
+            - (forward * dynamic_distance) 
             + (Vec3::Y * height_offset) 
             + (right * side_offset);
 
-        // 4. Kamerayı anında ışınlamak yerine, olduğu yerden olması gereken yere yumuşakça kaydır
-        camera_transform.translation = camera_transform.translation.lerp(desired_camera_pos, time.delta_seconds() * camera_speed);
+        // 4. RAYCAST - Duvar Kontrolü
+        let ray_origin = player_pos + Vec3::Y * 1.0;
+        let ray_vector = desired_camera_pos - ray_origin;
+        let max_distance = ray_vector.length();
+        let ray_direction = ray_vector.normalize_or_zero();
 
-        // 5. Kameranın yüzünü düşmanın gövdesine doğru çevir
-        let look_target = target_pos + Vec3::Y * 1.0;
+        let filter = QueryFilter::new()
+            .exclude_collider(player_entity)
+            .exclude_collider(target_entity);
+
+        let final_camera_pos = if max_distance > 0.0 {
+            if let Some((_hit_entity, toi)) = rapier_context.cast_ray(
+                ray_origin,
+                ray_direction,
+                max_distance,
+                true,
+                filter
+            ) {
+                ray_origin + ray_direction * (toi - 0.2).max(0.5)
+            } else {
+                desired_camera_pos
+            }
+        } else {
+            desired_camera_pos
+        };
+
+        // 5. Kamerayı ideal konuma kaydır
+        camera_transform.translation = camera_transform.translation.lerp(final_camera_pos, time.delta_seconds() * camera_speed);
+        
+        // 6. AĞIRLIKLI BAKIŞ NOKTASI (Weighted Look-Target)
+        // Kamera sadece düşmana bakarsa yüksek düşmanlarda oyuncu ekrandan çıkar.
+        // Bu yüzden oyuncunun kafası ile düşmanın gövdesi arasında bir orta noktaya bakacağız.
+        let player_head = player_pos + Vec3::Y * 1.5;
+        let target_center = target_pos + Vec3::Y * 1.0;
+        
+        // Hedefe %70, oyuncuya %30 odaklan (lerp değeri 0.0 oyuncu, 1.0 hedef demektir)
+        let look_target = player_head.lerp(target_center, 0.7);
+
         camera_transform.look_at(look_target, Vec3::Y);
     }
 }

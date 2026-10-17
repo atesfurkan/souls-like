@@ -3,24 +3,18 @@ use bevy::prelude::*;
 #[derive(Component)]
 pub struct Enemy;
 
-// YENİ: FSM Durumları
-#[derive(Component, Default, PartialEq, Eq, Clone, Copy ,Debug)]
+// Stagger durumu kaldırıldı, ortak CombatState veya Poise sistemi bunu yönetecek.
+#[derive(Component, Default, PartialEq, Eq, Clone, Copy, Debug)]
 pub enum EnemyAIState {
     #[default]
     Idle,
     Chase,
     Attack,
     Dead,
-    Stagger,
 }
 
+// StaggerState struct'ı tamamen silindi.
 
-#[derive(Component)]
-pub struct StaggerState {
-    pub timer: Timer,
-}
-
-// YENİ: Düşman Yapay Zeka Ayarları (Data-driven esneklik sağlar)
 #[derive(Component)]
 pub struct EnemyAI {
     pub detection_range: f32,

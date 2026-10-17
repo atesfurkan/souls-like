@@ -2,6 +2,21 @@ use bevy::prelude::*;
 use bevy::utils::{HashMap, HashSet};
 use crate::game::weapon::components::{Weapon, AttackDefinition, AttackType}; 
 
+#[derive(Component)]
+pub struct RightHand;
+
+#[derive(Component)]
+pub struct LeftHand;
+
+#[derive(Component)]
+pub struct UnarmedConfig {
+    pub attacks: HashMap<AttackType, AttackDefinition>,
+}
+
+#[derive(Component, Default)]
+pub struct CombatInput {
+    pub attack_held: bool, // Tuşun basılı tutulup tutulmadığını takip eder
+}
 
 // game/combat/components.rs dosyasına ekle
 #[derive(Component, Default)]
@@ -36,14 +51,15 @@ impl Default for AttackIntent {
     }
 }
 
-//attackdef vardı 
-//weapon vardı
 #[derive(Component, Default , PartialEq , Eq)]
 pub enum CombatState {
     #[default]
     Idle,
-    // Artık her durum, hangi saldırının yapıldığını biliyor
-    Windup { timer: Timer, attack_type: AttackType },
+    Windup { 
+        timer: Timer, 
+        charge_timer: Timer, // YENİ: Maksimum charge süresini tutar
+        attack_type: AttackType 
+    },
     Active { timer: Timer, hitbox_entity: Option<Entity>, attack_type: AttackType },
     Recovery { timer: Timer, attack_type: AttackType },
     Recoiled { timer: Timer },
@@ -52,6 +68,7 @@ pub enum CombatState {
 #[derive(Component)]
 pub struct Hitbox {
     pub damage: f32,
+    pub poise_damage: f32,
     pub owner: Entity,
     pub hit_entities: HashSet<Entity>,
     pub lifesteal: f32,

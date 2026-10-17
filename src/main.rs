@@ -1,3 +1,5 @@
+//oyunun main.rs dosyası
+#![allow(warnings)]
 use bevy::prelude::*;
 mod game;
 
